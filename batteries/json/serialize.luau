@@ -1,4 +1,3 @@
---!optimize 2
 --!native
 local COMMA = 44
 local QUOTATION = 34
@@ -29,41 +28,17 @@ local function alloc(len: number)
 		return
 	end
 
-	size *= 2
+	while cursor + len < size do
+		size *= 2
+	end
+
 	local newbuff = buffer.create(size)
-
 	buffer.copy(newbuff, 0, buff)
-
 	buff = newbuff
-end
-
-local function WRITE_OPEN_BRACE()
-	buffer.writeu8(buff, cursor, OPEN_BRACE)
-	cursor += 1
-end
-
-local function WRITE_OPEN_BRACKET()
-	buffer.writeu8(buff, cursor, OPEN_BRACKET)
-	cursor += 1
-end
-
-local function WRITE_CLOSE_BRACKET()
-	buffer.writeu8(buff, cursor, CLOSE_BRACKET)
-	cursor += 1
-end
-
-local function WRITE_CLOSE_BRACE()
-	buffer.writeu8(buff, cursor, CLOSE_BRACE)
-	cursor += 1
 end
 
 local function WRITE_QUOTATION()
 	buffer.writeu8(buff, cursor, QUOTATION)
-	cursor += 1
-end
-
-local function WRITE_BACKSLASH()
-	buffer.writeu8(buff, cursor, BACKSLASH)
 	cursor += 1
 end
 
@@ -72,31 +47,14 @@ local function WRITE_COMMA()
 	cursor += 1
 end
 
-local function WRITE_TRUE()
-	buffer.writeu32(buff, cursor, 1702195828)
-	cursor += 4
-end
-
-local function WRITE_FALSE()
-	buffer.writeu32(buff, cursor, 1936482662)
-	buffer.writeu8(buff, cursor + 4, 101)
-	cursor += 5
-end
-
-local function WRITE_NULL()
-	buffer.writeu32(buff, cursor, 1819047278)
-	cursor += 4
-end
-
 local function writeString(str: string)
-	alloc(#str)
+	local len = #str
+	alloc(len)
 
 	buffer.writestring(buff, cursor, str)
 
-	cursor += #str
+	cursor += len
 end
-
-local serializeAny: (value: types.Value) -> ()
 
 local function serializeUnicode(codepoint: number)
 	if codepoint >= 0x10000 then
@@ -116,7 +74,9 @@ local function serializeString(str: string)
 
 	for pos, codepoint in utf8.codes(str) do
 		if ESCAPE_MAP[codepoint] then
-			WRITE_BACKSLASH()
+			-- write \
+			buffer.writeu8(buff, cursor, BACKSLASH)
+			cursor += 1
 
 			buffer.writeu8(buff, cursor, ESCAPE_MAP[codepoint])
 			cursor += 1
@@ -133,11 +93,16 @@ local function serializeString(str: string)
 	WRITE_QUOTATION()
 end
 
+local serializeAny: (value: types.Value) -> ()
+
 local function serializeArray(array: types.Array)
 	-- open close bracket
 	-- 1 comma for each array element
 	alloc(2 + #array)
-	WRITE_OPEN_BRACKET()
+
+	-- write [
+	buffer.writeu8(buff, cursor, OPEN_BRACKET)
+	cursor += 1
 
 	for _, value in array do
 		serializeAny(value)
@@ -147,14 +112,18 @@ local function serializeArray(array: types.Array)
 	-- get rid of comma
 	cursor -= 1
 
-	WRITE_CLOSE_BRACKET()
+	-- write ]
+	buffer.writeu8(buff, cursor, CLOSE_BRACKET)
+	cursor += 1
 end
 
 local function serializeTable(object: types.Object)
 	-- openbrace, newline
 	alloc(2)
 
-	WRITE_OPEN_BRACE()
+	-- write {
+	buffer.writeu8(buff, cursor, OPEN_BRACE)
+	cursor += 1
 
 	for key, value in object do
 		-- quotation 2x, colon and comma
@@ -162,10 +131,9 @@ local function serializeTable(object: types.Object)
 
 		WRITE_QUOTATION()
 		buffer.writestring(buff, cursor, key)
-		cursor += #key
+		cursor += #key + 2
 
-		buffer.writestring(buff, cursor, '":')
-		cursor += 2
+		buffer.writestring(buff, cursor - 2, '":')
 
 		serializeAny(value)
 
@@ -175,7 +143,9 @@ local function serializeTable(object: types.Object)
 	-- get rid of the comma
 	cursor -= 1
 
-	WRITE_CLOSE_BRACE()
+	-- write }
+	buffer.writeu8(buff, cursor, CLOSE_BRACE)
+	cursor += 1
 end
 
 serializeAny = function(value: types.Value)
@@ -195,11 +165,18 @@ serializeAny = function(value: types.Value)
 		buffer.writestring(buff, cursor, numstr)
 		cursor += #numstr
 	elseif value == types.NULL then
-		WRITE_NULL()
+		-- null as u32
+		buffer.writeu32(buff, cursor, 1819047278)
+		cursor += 4
 	elseif value == true then
-		WRITE_TRUE()
+		-- true as u32
+		buffer.writeu32(buff, cursor, 1702195828)
+		cursor += 4
 	elseif value == false then
-		WRITE_FALSE()
+		-- false as u32 + u8
+		buffer.writeu32(buff, cursor, 1936482662)
+		buffer.writeu8(buff, cursor + 4, 101)
+		cursor += 5
 	else
 		error("Unknown value", 2)
 	end
