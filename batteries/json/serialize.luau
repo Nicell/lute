@@ -1,3 +1,4 @@
+--!native
 local SPACE = 32
 local NEWLINE = 10
 local COMMA = 44
