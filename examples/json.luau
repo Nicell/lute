@@ -1,6 +1,6 @@
-local json = require("@batteries/json")
+local json = require("@batteries/json/serialize")
 
-local serialize = json.serialize({
+local serialize = json({
 	hello = "world",
 	arr = { "foo", 2, true, false, 50000 },
 	struct = {
