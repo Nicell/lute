@@ -11,15 +11,6 @@ int luteopen_fs(lua_State* L);
 namespace fs
 {
 
-extern const char* UV_TYPENAME_UNKNOWN;
-extern const char* UV_TYPENAME_FILE;
-extern const char* UV_TYPENAME_DIR;
-extern const char* UV_TYPENAME_LINK;
-extern const char* UV_TYPENAME_FIFO;
-extern const char* UV_TYPENAME_SOCKET;
-extern const char* UV_TYPENAME_CHAR;
-extern const char* UV_TYPENAME_BLOCK;
-
 // TODO: add the ability to open as bytes
 /* Takes  path: string, a mode: 'r|a|w|x|+' (defaulting to r when omitted)
    Returns a table representing a handle to the file the state of a file {fd : number, error : ...}
