@@ -26,10 +26,18 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Setup and Build Lute
+        id: build_lute
         uses: ./.github/actions/setup-and-build
         with:
-          config: debug
+          config: release
           options: ${{ matrix.options }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          path: ${{ steps.build_lute.outputs.exe_path }}
+          name: ${{ matrix.os }}-${{ matrix.options && matrix.options || '' }}
+          retention-days: 1
 
   check-format:
     runs-on: ubuntu-latest
