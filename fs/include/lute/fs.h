@@ -11,14 +11,14 @@ int luteopen_fs(lua_State* L);
 namespace fs
 {
 
-extern const char* UV_TYPENAME_UNKNOWN;
-extern const char* UV_TYPENAME_FILE;
-extern const char* UV_TYPENAME_DIR;
-extern const char* UV_TYPENAME_LINK;
-extern const char* UV_TYPENAME_FIFO;
-extern const char* UV_TYPENAME_SOCKET;
-extern const char* UV_TYPENAME_CHAR;
-extern const char* UV_TYPENAME_BLOCK;
+inline const char* UV_TYPENAME_UNKNOWN = "unknown"; // UV_DIRENT_UNKNOWN
+inline const char* UV_TYPENAME_FILE = "file";       // UV_DIRENT_FILE
+inline const char* UV_TYPENAME_DIR = "dir";         // UV_DIRENT_DIR
+inline const char* UV_TYPENAME_LINK = "link";       // UV_DIRENT_LINK
+inline const char* UV_TYPENAME_FIFO = "fifo";       // UV_DIRENT_FIFO
+inline const char* UV_TYPENAME_SOCKET = "socket";   // UV_DIRENT_SOCKET
+inline const char* UV_TYPENAME_CHAR = "char";       // UV_DIRENT_CHAR
+inline const char* UV_TYPENAME_BLOCK = "block";     // UV_DIRENT_BLOCK
 
 // TODO: add the ability to open as bytes
 /* Takes  path: string, a mode: 'r|a|w|x|+' (defaulting to r when omitted)

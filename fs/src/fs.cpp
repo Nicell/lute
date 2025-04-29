@@ -47,15 +47,6 @@
 namespace fs
 {
 
-const char* UV_TYPENAME_UNKNOWN = "unknown"; // UV_DIRENT_UNKNOWN
-const char* UV_TYPENAME_FILE = "file";       // UV_DIRENT_FILE
-const char* UV_TYPENAME_DIR = "dir";         // UV_DIRENT_DIR
-const char* UV_TYPENAME_LINK = "link";       // UV_DIRENT_LINK
-const char* UV_TYPENAME_FIFO = "fifo";       // UV_DIRENT_FIFO
-const char* UV_TYPENAME_SOCKET = "socket";   // UV_DIRENT_SOCKET
-const char* UV_TYPENAME_CHAR = "char";       // UV_DIRENT_CHAR
-const char* UV_TYPENAME_BLOCK = "block";     // UV_DIRENT_BLOCK
-
 const char* UV_DIRENT_TYPES[] = {
     UV_TYPENAME_UNKNOWN,
     UV_TYPENAME_FILE,
