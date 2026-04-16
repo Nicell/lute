@@ -11,6 +11,7 @@
 #include "lute/process.h"
 #include "lute/system.h"
 #include "lute/task.h"
+#include "lute/tty.h"
 #include "lute/time.h"
 #include "lute/vm.h"
 
@@ -29,6 +30,7 @@ const Luau::DenseHashMap<std::string, lua_CFunction> kLuteModules = []()
     map["@lute/net/server.luau"] = luteopen_net_server;
     map["@lute/process.luau"] = luteopen_process;
     map["@lute/task.luau"] = luteopen_task;
+    map["@lute/tty.luau"] = luteopen_tty;
     map["@lute/vm.luau"] = luteopen_vm;
     map["@lute/system.luau"] = luteopen_system;
     map["@lute/time.luau"] = luteopen_time;

@@ -144,6 +144,7 @@ add_subdirectory(lute/task)
 add_subdirectory(lute/vm)
 add_subdirectory(lute/process)
 add_subdirectory(lute/system)
+add_subdirectory(lute/tty)
 add_subdirectory(lute/time)
 add_subdirectory(lute/io)
 
