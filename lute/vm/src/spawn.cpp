@@ -1,5 +1,6 @@
 #include "lute/vm.h"
 
+#include "lute/clivfs.h"
 #include "lute/ref.h"
 #include "lute/require.h"
 #include "lute/requirevfs.h"
@@ -134,29 +135,43 @@ static int crossVmMarshall(lua_State* L)
             auto co = getRefForThread(L);
             lua_pop(target.runtime->GL, 1);
 
-            target.runtime->runningThreads.push_back(
-                {true,
-                 co,
-                 argCount,
-                 [source, target = target.runtime, co]
-                 {
-                     co->push(target->GL);
-                     lua_State* L = lua_tothread(target->GL, -1);
-                     lua_pop(target->GL, 1);
+            // Use a completion handler keyed by L so this fires exactly once,
+            // when the child coroutine ultimately finishes or errors — even
+            // if it yields internally first (e.g. during fs.open/read in the
+            // child). Storing the callback in the running-thread `cont` would
+            // drop it on the first internal yield, since that cont is only
+            // invoked when lua_resume returns LUA_OK (not LUA_YIELD).
+            ThreadCompletionHandler completion;
+            completion.onFinish = [source, target = target.runtime](lua_State* L, int status)
+            {
+                if (status != LUA_OK)
+                {
+                    const char* msg = lua_isstring(L, -1) ? lua_tostring(L, -1) : "cross-VM call failed";
+                    source->fail(std::string(msg));
+                    return;
+                }
 
-                     std::shared_ptr<Ref> rets = packStackValues(L, target);
+                std::shared_ptr<Ref> rets = packStackValues(L, target);
 
-                     source->complete(
-                         [target, rets](lua_State* L)
-                         {
-                             return unpackStackValue(target, L, rets);
-                         }
-                     );
-                 }}
-            );
+                source->complete(
+                    [target, rets](lua_State* L)
+                    {
+                        return unpackStackValue(target, L, rets);
+                    }
+                );
+            };
+
+            target.runtime->addThreadCompletionHandler(L, std::move(completion));
+            target.runtime->runningThreads.push_back({true, co, argCount});
         }
     );
 
+    // Clear arguments from the stack before yielding. Arguments have already
+    // been packed into the target VM; leaving them here would cause
+    // crossVmMarshallCont's lua_gettop(L) to include them, and Luau's
+    // luau_poscall would then treat the original arguments as return values,
+    // since it takes the last N stack slots as results.
+    lua_settop(L, 0);
     return lua_yield(L, 0);
 }
 
@@ -183,7 +198,11 @@ static void* createChildVmRequireContext(lua_State* L)
     if (!ctx)
         luaL_error(L, "unable to allocate RequireCtx");
 
-    ctx = new (ctx) RequireCtx{std::make_unique<RequireVfs>()};
+    // CliVfs is included so child VMs spawned from CLI-embedded modules
+    // (e.g. `lute test`) can resolve `@cli/...` and relative paths whose
+    // requirer chunkname starts with `@@cli/`. CliVfs is stateful but cheap
+    // to default-construct; it has no effect for non-CLI parents.
+    ctx = new (ctx) RequireCtx{std::make_unique<RequireVfs>(CliVfs{})};
 
     // Store RequireCtx in the registry to keep it alive for the lifetime of
     // this lua_State. Memory address is used as a key to avoid collisions.
@@ -211,8 +230,9 @@ int VM::lua_spawn(lua_State* L)
     lua_Debug ar;
     lua_getinfo(L, 1, "s", &ar);
 
-    // Require the target module
-    RequireCtx ctx{std::make_unique<RequireVfs>()};
+    // Require the target module. CliVfs is included so vm.create can be
+    // called from CLI-embedded modules (chunkname `@@cli/...`).
+    RequireCtx ctx{std::make_unique<RequireVfs>(CliVfs{})};
     luarequire_pushproxyrequire(child->GL, requireConfigInit, &ctx);
     lua_pushstring(child->GL, file);
     lua_pushstring(child->GL, ar.source);

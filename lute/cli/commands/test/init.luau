@@ -1,18 +1,18 @@
 local cli = require("@batteries/cli")
 local finder = require("@self/finder")
-local filter = require("@self/filter")
 local luau = require("@std/luau")
 local path = require("@std/path")
 local ps = require("@std/process")
+local system = require("@std/system")
+local task = require("@std/task")
+local vm = require("@lute/vm")
 local testtypes = require("@std/test/types")
-local runner = require("@std/test/runner")
 local reporter = require("@self/reporter")
 local test = require("@std/test")
 local snaprunner = require("@self/snap/runner")
 local updater = require("@self/snap/updater")
 
 local function loadtests(testfiles: { path.Path })
-	-- Load all test files first
 	for _, p in testfiles do
 		local success, err = pcall(luau.loadModule, p, nil)
 
@@ -24,7 +24,6 @@ local function loadtests(testfiles: { path.Path })
 end
 
 local function listtests()
-	-- Gets all registered tests using the shared test instance
 	local registered = test._registered()
 
 	print("Anonymous:")
@@ -40,10 +39,63 @@ local function listtests()
 	end
 end
 
-local function runtests(env: testtypes.TestEnvironment, runner: testtypes.TestRunner, reporter: testtypes.TestReporter)
-	local result = runner(env)
+-- Spawns up to `system.threadCount()` persistent child VM workers and has each
+-- pull the next file from a shared cursor as it becomes free. This naturally
+-- balances load even when a few files dominate the total runtime. Each worker
+-- keeps a fresh `@std/test/env` (reset per file) so registered test state is
+-- never shared across concurrent runs. Cross-VM calls are cheap — packing is
+-- a few scalars and a small result table — so one call per file is fine.
+local function runtests(testfiles: { path.Path }, suiteName: string?, caseName: string?)
+	local result: testtypes.TestRunResult = { failures = {}, total = 0, failed = 0, passed = 0 }
+	local nfiles = #testfiles
 
-	reporter(result)
+	if nfiles > 0 then
+		local nworkers = math.max(1, math.min(system.threadCount(), nfiles))
+
+		local cursor = 1
+		-- Luau coroutines are cooperative and only yield at explicit points,
+		-- so this increment is safe without a lock: the cross-VM call yields,
+		-- not the cursor read itself.
+		local function takenext(): path.Path?
+			if cursor > nfiles then
+				return nil
+			end
+			local p = testfiles[cursor]
+			cursor += 1
+			return p
+		end
+
+		local done = 0
+		for _ = 1, nworkers do
+			task.spawn(function()
+				local worker = vm.create("@self/worker")
+				while true do
+					local p = takenext()
+					if not p then
+						break
+					end
+					local r = worker.runfile({
+						file = path.format(p),
+						suite = suiteName,
+						case = caseName,
+					})
+					result.total += r.total
+					result.passed += r.passed
+					result.failed += r.failed
+					for _, f in r.failures do
+						table.insert(result.failures, f)
+					end
+				end
+				done += 1
+			end)
+		end
+
+		while done < nworkers do
+			task.wait()
+		end
+	end
+
+	reporter.color(result)
 	if result.failed ~= 0 then
 		ps.exit(1)
 	end
@@ -96,14 +148,13 @@ local function main(...: string)
 	end
 
 	local searchpath = if forwarded and #forwarded > 0 then forwarded else { "./" }
-	loadtests(finder.findtestfiles(searchpath))
+	local testfiles = finder.findtestfiles(searchpath)
 
 	if args:has("list") then
+		loadtests(testfiles)
 		listtests()
 	else
-		local env = test._registered() :: testtypes.TestEnvironment
-		local filteredEnv = filter.filtertests(env, args:get("suite"), args:get("case"))
-		runtests(filteredEnv, runner.run, reporter.color)
+		runtests(testfiles, args:get("suite"), args:get("case"))
 	end
 end
 
