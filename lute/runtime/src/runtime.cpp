@@ -45,8 +45,11 @@ Runtime::~Runtime()
         runLoopCv.notify_one();
     }
 
-    if (runLoopThread.joinable())
-        runLoopThread.join();
+    if (runLoopThreadStarted)
+    {
+        uv_thread_join(&runLoopThread);
+        runLoopThreadStarted = false;
+    }
     // At this point, Runtime::hasWork will have returned false (i.e uv_loop_alive is false)
     // This means there are no outstanding handles, or file descriptors or work, to do, and we can exit
     uv_loop_close(&eventLoop);
@@ -189,29 +192,49 @@ void Runtime::reportError(lua_State* L)
 
 void Runtime::runContinuously()
 {
-    // TODO: another place for libuv
-    runLoopThread = std::thread(
-        [this]
+    // Child VMs load Luau modules on this thread, which recurses through
+    // luau_execute -> require -> lua_resume -> luau_execute for every nested
+    // require. The default pthread stack on macOS (512 KB) overflows under
+    // ASan, where each frame is several times larger than normal, so we ask
+    // libuv for a stack comparable to the main thread's.
+    uv_thread_options_t opts = {};
+    opts.flags = UV_THREAD_HAS_STACK_SIZE;
+    opts.stack_size = 8 * 1024 * 1024;
+
+    int rc = uv_thread_create_ex(
+        &runLoopThread,
+        &opts,
+        [](void* arg)
         {
-            while (!stop)
+            Runtime* self = static_cast<Runtime*>(arg);
+            while (!self->stop)
             {
                 // Block to wait on event
                 {
-                    std::unique_lock lock(continuationMutex);
+                    std::unique_lock lock(self->continuationMutex);
 
-                    runLoopCv.wait(
+                    self->runLoopCv.wait(
                         lock,
-                        [this]
+                        [self]
                         {
-                            return !continuations.empty() || stop;
+                            return !self->continuations.empty() || self->stop;
                         }
                     );
                 }
 
-                runToCompletion();
+                self->runToCompletion();
             }
-        }
+        },
+        this
     );
+
+    if (rc != 0)
+    {
+        LUTE_ASSERT("Failed to create runtime runloop thread");
+        return;
+    }
+
+    runLoopThreadStarted = true;
 }
 
 bool Runtime::hasContinuations()
