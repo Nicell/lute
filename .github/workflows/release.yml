@@ -12,12 +12,6 @@ jobs:
         run: |
           BRANCH="${{ github.ref_name }}"
 
-          if [[ ! "$BRANCH" =~ ^release/v[0-9]+\.[0-9]+\.x$ ]]; then
-            echo "Invalid branch format: $BRANCH. Expected release/v{Major}.{Minor}.x"
-            echo "Dispatch this workflow on a release branch (e.g. release/v0.1.x)"
-            exit 1
-          fi
-
   release-common:
     needs: validate
     permissions:
