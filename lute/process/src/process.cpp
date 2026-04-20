@@ -39,14 +39,6 @@ void convertCRLFtoLF(std::string& str)
     str.resize(writePos);
 }
 
-// Decrements the owning ProcessHandle's pending-close count and releases its
-// self-reference once all uv handles associated with it have finished closing.
-// Because libuv stores `closing_handles` as a LIFO linked list where each node
-// is embedded in its owning uv_handle_t, destroying the ProcessHandle while
-// any of its other handles are still in that list would leave
-// `uv__run_closing_handles` walking freed memory (heap-use-after-free).
-static void onHandleClose(uv_handle_t* handle);
-
 struct ProcessHandle
 {
     uv_process_t process;
@@ -61,12 +53,14 @@ struct ProcessHandle
     bool completed = false;
     ResumeToken resumeToken;
     std::shared_ptr<ProcessHandle> self;
-    // Starts at 1 to represent the implicit "alive" reference held while the
-    // process is running. `closeHandles()` adds one per handle it schedules
-    // to close, then drops the alive reference; each close callback decrements
-    // by one. Only when the counter reaches zero (i.e. every queued handle has
-    // been fully drained from libuv's closing list) do we reset `self`.
     std::atomic<int> pendingCloses{1};
+
+    static void onHandleClose(uv_handle_t* handle)
+    {
+        ProcessHandle* ph = static_cast<ProcessHandle*>(handle->data);
+        if (--ph->pendingCloses == 0)
+            ph->self.reset();
+    }
 
     void closeHandles()
     {
@@ -174,15 +168,6 @@ struct ProcessOptions
     std::map<std::string, std::string> env;
     std::string customShell; // only used by system()
 };
-
-static void onHandleClose(uv_handle_t* handle)
-{
-    ProcessHandle* ph = static_cast<ProcessHandle*>(handle->data);
-    if (--ph->pendingCloses == 0)
-    {
-        ph->self.reset();
-    }
-}
 
 static void onProcessExit(uv_process_t* process, int64_t exitStatus, int termSignal)
 {
@@ -366,15 +351,11 @@ int executionHelper(lua_State* L, std::vector<std::string> args, ProcessOptions 
     // In the default stdio mode we create a pipe for the child's stdin so that
     // future APIs can feed data to it, but there is no API to write to it yet.
     // Close our write end immediately so the child sees EOF on stdin instead
-    // of blocking forever on a read. Route through onHandleClose so the
-    // pending-close counter accounts for this handle; otherwise if the stdin
-    // close is still queued in libuv's closing_handles list when the process
-    // exits, the later cascade of closes could destroy the ProcessHandle
-    // before libuv finishes iterating that list (heap-use-after-free).
+    // of blocking forever on a read.
     if (opts.stdioKind == kStdioKindDefault || opts.stdioKind.empty())
     {
         handle->pendingCloses++;
-        uv_close((uv_handle_t*)&handle->stdinPipe, onHandleClose);
+        uv_close((uv_handle_t*)&handle->stdinPipe, ProcessHandle::onHandleClose);
     }
 
     uv_read_start((uv_stream_t*)&handle->stdoutPipe, allocBuffer, onPipeRead);
