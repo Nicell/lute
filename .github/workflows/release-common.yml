@@ -70,20 +70,22 @@ jobs:
         run: |
           set -euo pipefail
           dnf install -y --allowerasing \
-            llvm-toolset gcc gcc-c++ libstdc++-devel glibc-devel \
+            llvm-toolset lld gcc gcc-c++ libstdc++-devel glibc-devel \
             ninja-build perl-IPC-Cmd which
 
           # Force clang for the whole build (incl. bootstrap, where CMake
           # would otherwise auto-pick gcc-toolset-14's g++ from PATH) and
           # point it at the system gcc 8.5 install so libstdc++ stays at
           # GLIBCXX_3.4.25 / CXXABI_1.3.11 (compatible with glibc 2.28).
+          # -fuse-ld=lld routes clang's LTO output through the LLVM linker
+          # for faster links and unlocks --icf=safe in the cmake build.
           GCC_FLAG="--gcc-install-dir=/usr/lib/gcc/$(uname -m)-redhat-linux/8"
           {
             echo "CC=clang"
             echo "CXX=clang++"
             echo "CFLAGS=${GCC_FLAG}"
             echo "CXXFLAGS=${GCC_FLAG}"
-            echo "LDFLAGS=${GCC_FLAG}"
+            echo "LDFLAGS=${GCC_FLAG} -fuse-ld=lld"
           } >> "$GITHUB_ENV"
 
       - name: Setup and Build Lute
