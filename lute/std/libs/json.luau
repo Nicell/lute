@@ -19,148 +19,82 @@ local object_key = newproxy()
 
 -- serialization
 
-local bufferSize = 1024
-
-type SerializerState = {
-	buf: buffer,
-	cursor: number,
-	prettyPrint: boolean,
-	depth: number,
+-- Map of bytes that must be escaped inside a JSON string. Built once at module
+-- load; the slow-path `string.gsub` uses this as the replacement table.
+local STRING_ESCAPES: { [string]: string } = {
+	["\\"] = "\\\\",
+	['"'] = '\\"',
+	["\b"] = "\\b",
+	["\f"] = "\\f",
+	["\n"] = "\\n",
+	["\r"] = "\\r",
+	["\t"] = "\\t",
 }
-
-local function checkState(state: SerializerState, len: number): ()
-	local curLen = buffer.len(state.buf)
-
-	if state.cursor + len < curLen then
-		return
+for i = 0, 31 do
+	local c = string.char(i)
+	if not STRING_ESCAPES[c] then
+		STRING_ESCAPES[c] = string.format("\\u%04x", i)
 	end
-
-	local newBuffer = buffer.create(curLen * 2)
-
-	buffer.copy(newBuffer, 0, state.buf)
-
-	state.buf = newBuffer
 end
 
-local function writeByte(state: SerializerState, byte: number): ()
-	checkState(state, 1)
+-- Pattern matching any byte that requires escaping.
+local STRING_NEEDS_ESCAPE = '[%z\1-\31"\\]'
 
-	buffer.writeu8(state.buf, state.cursor, byte)
-
-	state.cursor += 1
+-- Cache of pretty-print indent strings per depth.
+local INDENT_CACHE: { [number]: string } = { [0] = "" }
+local function indentFor(depth: number): string
+	local cached = INDENT_CACHE[depth]
+	if cached then
+		return cached
+	end
+	local s = string.rep("    ", depth)
+	INDENT_CACHE[depth] = s
+	return s
 end
 
-local function writeSpaces(state: SerializerState): ()
-	if state.depth == 0 then
-		return
-	end
+local null = json.null
 
-	if state.prettyPrint then
-		checkState(state, state.depth * 4)
+-- Hot-path: serialize without indentation. The compact serializer threads
+-- `(out, n)` through call args/returns to avoid touching a state table on
+-- every primitive.
+local serializeCompact: ({ string }, number, (Array | Object | boolean | number | string)?) -> number
 
-		for _ = 1, state.depth do
-			buffer.writeu32(state.buf, state.cursor, 0x_20_20_20_20)
-			state.cursor += 4
-		end
+local function serializeStringCompact(out: { string }, n: number, str: string): number
+	n += 1
+	if string.find(str, STRING_NEEDS_ESCAPE) then
+		out[n] = '"' .. string.gsub(str, STRING_NEEDS_ESCAPE, STRING_ESCAPES) .. '"'
 	else
-		buffer.writeu8(state.buf, state.cursor, (string.byte(" ")))
-
-		state.cursor += 1
+		out[n] = '"' .. str .. '"'
 	end
+	return n
 end
 
-local function writeString(state: SerializerState, str: string): ()
-	checkState(state, #str)
+local function serializeArrayCompact(out: { string }, n: number, array: Array): number
+	local len = #array
+	if len == 0 then
+		n += 1
+		out[n] = "[]"
+		return n
+	end
 
-	buffer.writestring(state.buf, state.cursor, str)
+	n += 1
+	out[n] = "["
+	n = serializeCompact(out, n, array[1])
 
-	state.cursor += #str
+	for i = 2, len do
+		n += 1
+		out[n] = ","
+		n = serializeCompact(out, n, array[i])
+	end
+
+	n += 1
+	out[n] = "]"
+	return n
 end
 
-local serializeAny: (SerializerState, (Array | Object | boolean | number | string)?) -> ()
-
-local ESCAPE_MAP = {
-	[0x5C] = string.byte("\\"), -- 5C = '\'
-	[0x08] = string.byte("b"),
-	[0x0C] = string.byte("f"),
-	[0x0A] = string.byte("n"),
-	[0x0D] = string.byte("r"),
-	[0x09] = string.byte("t"),
-	[0x22] = string.byte('"'),
-}
-
-local function serializeUnicode(codepoint: number): string
-	if codepoint >= 0x10000 then
-		local high = math.floor((codepoint - 0x10000) / 0x400) + 0xD800
-		local low = ((codepoint - 0x10000) % 0x400) + 0xDC00
-		return string.format("\\u%04x\\u%04x", high, low)
-	end
-
-	return string.format("\\u%04x", codepoint)
-end
-
-local function serializeString(state: SerializerState, str: string): ()
-	checkState(state, #str)
-
-	writeByte(state, string.byte('"'))
-
-	for _, codepoint in utf8.codes(str) do
-		if ESCAPE_MAP[codepoint] then
-			writeByte(state, string.byte("\\"))
-			writeByte(state, ESCAPE_MAP[codepoint])
-		elseif codepoint < 32 or codepoint > 126 then
-			writeString(state, serializeUnicode(codepoint))
-		else
-			writeString(state, utf8.char(codepoint))
-		end
-	end
-
-	writeByte(state, string.byte('"'))
-end
-
-local function serializeArray(state: SerializerState, array: Array): ()
-	state.depth += 1
-
-	writeByte(state, string.byte("["))
-
-	if state.prettyPrint and #array ~= 0 then
-		writeByte(state, string.byte("\n"))
-	end
-
-	for i, value in array do
-		if i ~= 1 then
-			writeByte(state, string.byte(","))
-
-			if state.prettyPrint then
-				writeByte(state, string.byte("\n"))
-			end
-		end
-
-		if i ~= 1 or state.prettyPrint then
-			writeSpaces(state)
-		end
-
-		serializeAny(state, value)
-	end
-
-	state.depth -= 1
-
-	if state.prettyPrint and #array ~= 0 then
-		writeByte(state, string.byte("\n"))
-		writeSpaces(state)
-	end
-
-	writeByte(state, string.byte("]"))
-end
-
-local function serializeTable(state: SerializerState, object: Object): ()
-	writeByte(state, string.byte("{"))
-
-	if state.prettyPrint then
-		writeByte(state, string.byte("\n"))
-	end
-
-	state.depth += 1
+local function serializeTableCompact(out: { string }, n: number, object: Object): number
+	n += 1
+	out[n] = "{"
 
 	local first = true
 	for key, value in object do
@@ -168,52 +102,174 @@ local function serializeTable(state: SerializerState, object: Object): ()
 			continue
 		end
 
-		if not first then
-			writeByte(state, string.byte(","))
-			writeByte(state, string.byte(" "))
-
-			if state.prettyPrint then
-				writeByte(state, string.byte("\n"))
-			end
+		if first then
+			first = false
+		else
+			n += 1
+			out[n] = ","
 		end
 
-		first = false
+		n = serializeStringCompact(out, n, key)
+		n += 1
+		out[n] = ":"
 
-		writeSpaces(state)
-
-		serializeString(state, key)
-		writeString(state, ": ")
-
-		serializeAny(state, value)
+		-- Inlined primitive dispatch: real-world objects average many small
+		-- leaf values per record, so saving the `serializeCompact` call here
+		-- is worth ~10% on object-heavy payloads.
+		local valueType = type(value)
+		if valueType == "string" then
+			n = serializeStringCompact(out, n, value :: string)
+		elseif valueType == "number" then
+			n += 1
+			out[n] = tostring(value)
+		elseif valueType == "boolean" then
+			n += 1
+			out[n] = if value then "true" else "false"
+		else
+			n = serializeCompact(out, n, value)
+		end
 	end
 
-	if state.prettyPrint then
-		writeByte(state, string.byte("\n"))
-	end
-
-	state.depth -= 1
-
-	writeSpaces(state)
-
-	writeByte(state, string.byte("}"))
+	n += 1
+	out[n] = "}"
+	return n
 end
 
-serializeAny = function(state: SerializerState, value: Value): ()
+serializeCompact = function(out: { string }, n: number, value: Value): number
 	local valueType = type(value)
 
-	if value == json.null then
-		writeString(state, "null")
-	elseif valueType == "boolean" then
-		writeString(state, if value then "true" else "false")
+	if valueType == "string" then
+		return serializeStringCompact(out, n, value :: string)
 	elseif valueType == "number" then
-		writeString(state, tostring(value))
-	elseif valueType == "string" then
-		serializeString(state, value :: string)
+		n += 1
+		out[n] = tostring(value)
+		return n
+	elseif valueType == "boolean" then
+		n += 1
+		out[n] = if value then "true" else "false"
+		return n
+	elseif value == null then
+		n += 1
+		out[n] = "null"
+		return n
 	elseif valueType == "table" then
-		if #(value :: {}) == 0 and next(value :: { [unknown]: unknown }) ~= nil then
-			serializeTable(state, value :: Object)
+		local t = value :: Array
+		if #t == 0 and next(t :: any) ~= nil then
+			return serializeTableCompact(out, n, value :: Object)
 		else
-			serializeArray(state, value :: Array)
+			return serializeArrayCompact(out, n, t)
+		end
+	else
+		error("Unknown value", 2)
+	end
+end
+
+-- Pretty-print path. Slower; depth is threaded explicitly.
+local serializePretty: ({ string }, number, (Array | Object | boolean | number | string)?, number) -> number
+
+local function serializeArrayPretty(out: { string }, n: number, array: Array, depth: number): number
+	local len = #array
+	if len == 0 then
+		n += 1
+		out[n] = "[]"
+		return n
+	end
+
+	local inner = indentFor(depth + 1)
+	local outer = indentFor(depth)
+
+	n += 1
+	out[n] = "[\n"
+	n += 1
+	out[n] = inner
+	n = serializePretty(out, n, array[1], depth + 1)
+
+	for i = 2, len do
+		n += 1
+		out[n] = ",\n"
+		n += 1
+		out[n] = inner
+		n = serializePretty(out, n, array[i], depth + 1)
+	end
+
+	n += 1
+	out[n] = "\n"
+	n += 1
+	out[n] = outer
+	n += 1
+	out[n] = "]"
+	return n
+end
+
+local function serializeTablePretty(out: { string }, n: number, object: Object, depth: number): number
+	local inner = indentFor(depth + 1)
+	local outer = indentFor(depth)
+
+	n += 1
+	out[n] = "{"
+
+	local first = true
+	for key, value in object do
+		if key == object_key then
+			continue
+		end
+
+		if first then
+			first = false
+			n += 1
+			out[n] = "\n"
+		else
+			n += 1
+			out[n] = ",\n"
+		end
+		n += 1
+		out[n] = inner
+
+		n = serializeStringCompact(out, n, key)
+
+		n += 1
+		out[n] = ": "
+
+		n = serializePretty(out, n, value, depth + 1)
+	end
+
+	if first then
+		n += 1
+		out[n] = "}"
+	else
+		n += 1
+		out[n] = "\n"
+		n += 1
+		out[n] = outer
+		n += 1
+		out[n] = "}"
+	end
+	return n
+end
+
+serializePretty = function(out: { string }, n: number, value: Value, depth: number): number
+	local valueType = type(value)
+
+	if valueType == "string" then
+		return serializeStringCompact(out, n, value :: string)
+	elseif valueType == "number" then
+		n += 1
+		out[n] = tostring(value)
+		return n
+	elseif valueType == "boolean" then
+		n += 1
+		out[n] = if value then "true" else "false"
+		return n
+	elseif value == null then
+		n += 1
+		out[n] = "null"
+		return n
+	elseif valueType == "table" then
+		local t = value :: Array
+		if #t == 0 and next(t :: any) ~= nil then
+			return serializeTablePretty(out, n, value :: Object, depth)
+		else
+			return serializeArrayPretty(out, n, t, depth)
 		end
 	else
 		error("Unknown value", 2)
@@ -527,16 +583,13 @@ end
 
 --- Serializes `value` to a JSON string. If `prettyPrint` is `true`, the output is indented for readability.
 function json.serialize(value: Value, prettyPrint: boolean?): string
-	local state: SerializerState = {
-		buf = buffer.create(bufferSize),
-		cursor = 0,
-		prettyPrint = prettyPrint or false,
-		depth = 0,
-	}
-
-	serializeAny(state, value)
-
-	return buffer.readstring(state.buf, 0, state.cursor)
+	local out = {}
+	if prettyPrint then
+		serializePretty(out, 0, value, 0)
+	else
+		serializeCompact(out, 0, value)
+	end
+	return table.concat(out)
 end
 
 --- Parses a JSON string and returns the corresponding Luau value. Returns `json.null` for a JSON `null` literal; compare with `json.null` rather than `nil` to check for null.
