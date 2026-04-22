@@ -277,306 +277,306 @@ serializePretty = function(out: { string }, n: number, value: Value, depth: numb
 end
 
 -- deserialization
+--
+-- Threaded-state design: each parser takes `(src, cursor)` and returns
+-- `(newCursor, value)`. Cursor is 1-indexed (Lua string convention) and points
+-- at the *next* byte to consume.
 
-type DeserializerState = {
-	src: string,
-	cursor: number,
+local function parseError(cursor: number, msg: string): never
+	return error(`JSON error - {msg} around {cursor}`)
+end
+
+-- skipWs: returns `(newCursor, firstByte)` where firstByte is the byte at the
+-- new cursor position (or nil at EOF). Returning the byte saves callers an
+-- extra `string.byte` since they always inspect the next byte.
+-- `string.find` with a character class jumps over runs of ws in one C call.
+local function skipWs(src: string, cursor: number): (number, number?)
+	-- Common case in compact JSON: cursor is already on a non-ws byte.
+	local b = string.byte(src, cursor)
+	if b == nil then
+		return cursor, nil
+	end
+	if b ~= 0x20 and b ~= 0x09 and b ~= 0x0A and b ~= 0x0D then
+		return cursor, b
+	end
+	cursor = (string.find(src, "[^ \t\r\n]", cursor)) or (#src + 1)
+	return cursor, string.byte(src, cursor)
+end
+
+-- Escape replacement table for the slow path of string parsing.
+local UNESCAPE: { [string]: string } = {
+	['"'] = '"',
+	["\\"] = "\\",
+	["/"] = "/",
+	b = "\b",
+	f = "\f",
+	n = "\n",
+	r = "\r",
+	t = "\t",
 }
 
-local function deserializerError(state: DeserializerState, msg: string): never
-	return error(`JSON error - {msg} around {state.cursor}`)
+local function decodeUnicodeEscape(hex: string, cursor: number): string
+	local cp = tonumber(hex, 16) :: number
+	if cp >= 0xD800 and cp <= 0xDBFF then
+		parseError(cursor, "Incomplete surrogate pair")
+	end
+	if cp >= 0xDC00 and cp <= 0xDFFF then
+		parseError(cursor, "Lone low surrogate")
+	end
+	return utf8.char(cp)
 end
 
-local function skipWhitespace(state: DeserializerState): boolean
-	state.cursor = string.find(state.src, "[^ \n\r\t]", state.cursor) :: number
-
-	if not state.cursor then
-		return false
+local function decodeSurrogatePair(highHex: string, lowHex: string, cursor: number): string
+	local high = tonumber(highHex, 16) :: number
+	local low = tonumber(lowHex, 16) :: number
+	if low < 0xDC00 or low > 0xDFFF then
+		parseError(cursor, "Invalid unicode surrogate pair")
 	end
-
-	return true
-end
-
-local function currentByte(state: DeserializerState): number
-	return (string.byte(state.src, state.cursor))
-end
-
-local function deserializeNumber(state: DeserializerState): number?
-	-- Integer part
-	local nStart, nEnd = string.find(state.src, "^-?[1-9]%d*", state.cursor)
-	if not nStart then
-		nStart, nEnd = string.find(state.src, "^-?0", state.cursor)
-		if not nStart then
-			deserializerError(state, "Malformed number (bad integer part)")
-		end
-
-		local nextChar = string.byte(state.src, nEnd :: number + 1)
-		if nextChar and nextChar >= string.byte("0") and nextChar <= string.byte("9") then
-			deserializerError(state, "Malformed number (leading zeros not allowed)")
-		end
-	end
-
-	-- Decimal part
-	local decStart, decEnd = string.find(state.src, "^%.%d+", nEnd :: number + 1)
-	if decStart then
-		nEnd = decEnd
-	end
-
-	-- Exponential part
-	local expStart, expEnd = string.find(state.src, "^[eE][+-]?%d+", nEnd :: number + 1)
-	if expStart then
-		nEnd = expEnd
-	end
-
-	local num = tonumber(string.sub(state.src, nStart :: number, nEnd))
-	if not num then
-		deserializerError(state, "Malformed number value")
-	end
-
-	state.cursor = nEnd :: number + 1
-	return num
-end
-
-local function decodeSurrogatePair(high, low): string?
-	local highVal = tonumber(high, 16)
-	local lowVal = tonumber(low, 16)
-	if not highVal or not lowVal then
-		return nil -- Invalid
-	end
-	-- Calculate the actual Unicode codepoint
-	local codepoint = 0x10000 + ((highVal - 0xD800) * 0x400) + (lowVal - 0xDC00)
+	local codepoint = 0x10000 + ((high - 0xD800) * 0x400) + (low - 0xDC00)
 	return utf8.char(codepoint)
 end
 
-local function deserializeString(state: DeserializerState): string
-	-- Must start with "
-	if currentByte(state) ~= string.byte('"') then
-		return deserializerError(state, "Expected string opening quote")
+-- parseString: cursor is at the opening `"`. Returns (newCursor, decoded).
+local function parseString(src: string, cursor: number): (number, string)
+	local startPos = cursor + 1
+
+	-- Fast path: scan for the first byte that is either a closing quote, a
+	-- backslash (escape), or a control character. If we find a quote first
+	-- and never see a backslash, the string contents are exactly the bytes
+	-- between the quotes — one `string.sub`, no allocation churn.
+	local p = string.find(src, '[\\"%z\1-\31]', startPos)
+	if not p then
+		parseError(cursor, "Unterminated string")
+	end
+	local b = string.byte(src, p)
+	if b == 0x22 then
+		return p + 1, string.sub(src, startPos, p - 1)
+	end
+	if b ~= 0x5C then
+		parseError(p, "Unescaped control character in string")
 	end
 
-	-- Skip opening quote "
-	state.cursor += 1
-
-	local startPos = state.cursor
-
-	while state.cursor <= #state.src do
-		local byte = currentByte(state)
-
-		-- Check for unescaped control characters (0x00-0x1F)
-		if byte < 0x20 then
-			return deserializerError(state, "Unescaped control character in string")
-		end
-
-		if byte == string.byte('"') then
-			state.cursor += 1
-			local source = string.sub(state.src, startPos, state.cursor - 2)
-
-			-- Validate escape sequences
-			-- Remove valid \\ first
-			local temp = string.gsub(source, "\\\\", "")
-
-			-- Check for invalid single-char escapes
-			if temp:match('\\[^bfnrt"\\/u]') then
-				return deserializerError(state, "Invalid escape sequence")
-			end
-
-			-- Check that all \u escapes have exactly 4 hex digits
-			if temp:match("\\u[^0-9a-fA-F]") or temp:match("\\u%x?%x?%x?$") then
-				return deserializerError(state, "Incomplete or invalid \\u escape")
-			end
-
-			-- Handle all surrogate pairs
-			source = string.gsub(
-				source,
-				"\\u([dD][89aAbB][0-9a-fA-F][0-9a-fA-F])\\u([dD][c-fC-F][0-9a-fA-F][0-9a-fA-F])",
-				function(high, low)
-					return decodeSurrogatePair(high, low) or deserializerError(state, "Invalid unicode surrogate pair")
-				end :: any
-			)
-
-			-- Detect incomplete/invalid surrogates
-			if source:match("\\u[dD][89aAbB][0-9a-fA-F][0-9a-fA-F]") then
-				return deserializerError(state, "Incomplete surrogate pair")
-			end
-
-			-- Handle regular Unicode escapes
-			source = string.gsub(source, "\\u(%x%x%x%x)", function(code)
-				return utf8.char(tonumber(code, 16) :: number)
-			end)
-
-			source = string.gsub(source, "\\\\", "\0")
-			source = string.gsub(source, "\\b", "\b")
-			source = string.gsub(source, "\\f", "\f")
-			source = string.gsub(source, "\\n", "\n")
-			source = string.gsub(source, "\\r", "\r")
-			source = string.gsub(source, "\\t", "\t")
-			source = string.gsub(source, '\\"', '"')
-			source = string.gsub(source, "\\/", "/")
-			source = string.gsub(source, "\0", "\\")
-
-			return source
-		end
-
-		if byte == string.byte("\\") then
-			state.cursor += 1
-		end
-
-		state.cursor += 1
-	end
-
-	state.cursor = startPos
-	return deserializerError(state, "Unterminated string")
-end
-
-local deserialize: (DeserializerState) -> (Array | Object | boolean | number | string)?
-
-local function deserializeArray(state: DeserializerState): Array
-	if currentByte(state) ~= string.byte("[") then
-		return deserializerError(state, "Expected array opening '['")
-	end
-
-	state.cursor += 1
-	skipWhitespace(state)
-
-	local current: Array = {}
-	local index = 1
-
-	-- empty array
-	if currentByte(state) == string.byte("]") then
-		state.cursor += 1
-		return current
-	end
-
-	local expectingValue = true
-
-	while state.cursor <= #state.src do
-		if not expectingValue then
-			-- Expect a comma or closing bracket
-			if currentByte(state) == string.byte(",") then
-				expectingValue = true
-				state.cursor += 1
-				if not skipWhitespace(state) then
-					return deserializerError(state, "Unterminated array")
-				end
-			elseif currentByte(state) == string.byte("]") then
-				state.cursor += 1
-				return current
-			else
-				return deserializerError(state, "Expected ',' or ']' after array value")
-			end
-		else
-			-- Expect a value next
-			if currentByte(state) == string.byte("]") then
-				if index == 1 then
-					-- empty array is ok
-					state.cursor += 1
-					return current
-				else
-					return deserializerError(state, "Trailing comma in array")
-				end
-			end
-
-			table.insert(current, deserialize(state))
-			index += 1
-			expectingValue = false
-		end
-
-		if not skipWhitespace(state) then
-			return deserializerError(state, "Unterminated array")
-		end
-	end
-
-	return deserializerError(state, "Unterminated array")
-end
-
-local function deserializeObject(state: DeserializerState): Object
-	state.cursor += 1
-
-	local current = {}
-
-	local expectingValue = false
-	while state.cursor < #state.src do
-		skipWhitespace(state)
-
-		if currentByte(state) == string.byte("}") then
+	-- Slow path: there is at least one backslash. Walk to the closing quote,
+	-- skipping escape sequences so we don't match `\"` as the terminator.
+	local len = #src
+	while p <= len do
+		local c = string.byte(src, p)
+		if c == 0x5C then
+			p += 2
+		elseif c == 0x22 then
 			break
-		end
-
-		skipWhitespace(state)
-
-		if currentByte(state) ~= string.byte('"') then
-			return deserializerError(state, "Expected a string key")
-		end
-
-		local key = deserializeString(state)
-
-		skipWhitespace(state)
-
-		if currentByte(state) ~= string.byte(":") then
-			return deserializerError(state, "Expected ':' for key value pair")
-		end
-
-		state.cursor += 1
-
-		local value = deserialize(state)
-
-		current[key] = value
-
-		if not skipWhitespace(state) then
-			deserializerError(state, "Unterminated object")
-		end
-
-		skipWhitespace(state)
-
-		if currentByte(state) == string.byte(",") then
-			expectingValue = true
-			state.cursor += 1
+		elseif c < 0x20 then
+			parseError(p, "Unescaped control character in string")
 		else
-			expectingValue = false
+			p += 1
 		end
 	end
-
-	if expectingValue then
-		return deserializerError(state, "Trailing comma")
+	if p > len then
+		parseError(cursor, "Unterminated string")
 	end
 
-	if not skipWhitespace(state) or currentByte(state) ~= string.byte("}") then
-		deserializerError(state, "Unterminated object")
-	end
+	local raw = string.sub(src, startPos, p - 1)
 
-	state.cursor += 1
+	-- Resolve escapes in five gsub passes (vs. ten in the old code). We use a
+	-- 0x01 sentinel to "freeze" `\\` sequences before the other passes run,
+	-- so that a `\\u0000` source isn't mis-parsed as backslash + `\u0000`.
+	-- The fast-path scan above guarantees the input contains no 0x01 bytes.
+	--   1. `\\` → 0x01            (freeze raw backslashes)
+	--   2. `\uHIGH\uLOW`           → utf8 surrogate pair
+	--   3. `\uXXXX`                → utf8 single code point
+	--   4. `\X` for X in `"/bfnrt` → corresponding char
+	--   5. 0x01 → `\`              (thaw)
+	raw = string.gsub(raw, "\\\\", "\1")
+	raw = string.gsub(raw, "\\u([dD][89aAbB]%x%x)\\u([dD][c-fC-F]%x%x)", function(h, l)
+		return decodeSurrogatePair(h, l, cursor)
+	end :: any)
+	raw = string.gsub(raw, "\\u(%x%x%x%x)", function(code)
+		return decodeUnicodeEscape(code, cursor)
+	end :: any)
+	raw = string.gsub(raw, "\\(.)", function(esc)
+		local v = UNESCAPE[esc]
+		if not v then
+			parseError(cursor, "Invalid escape sequence")
+		end
+		return v
+	end :: any)
+	raw = string.gsub(raw, "\1", "\\")
 
-	return current
+	return p + 1, raw
 end
 
-deserialize = function(state: DeserializerState): Value
-	skipWhitespace(state)
+-- skipDigits: advance cursor past any run of [0-9]. Uses `string.find` for
+-- one C call per run instead of an interpreted byte-by-byte loop.
+local function skipDigits(src: string, cursor: number): number
+	local p = string.find(src, "[^0-9]", cursor)
+	return p or (#src + 1)
+end
 
-	local fourChars = string.sub(state.src, state.cursor, state.cursor + 3)
+-- parseNumber: walk + validate the JSON number grammar in a single pass.
+-- We can't just use tonumber because Lua accepts forms JSON forbids ("1.",
+-- ".5", "0x1f", "1.e3", "inf", etc).
+local function parseNumber(src: string, cursor: number): (number, number)
+	local start = cursor
 
-	if string.match(fourChars, "^null") then
-		state.cursor += 4
-		return json.null
-	elseif string.match(fourChars, "^true") then
-		state.cursor += 4
-		return true
-	elseif string.match(string.sub(state.src, state.cursor, state.cursor + 4), "^false") then
-		state.cursor += 5
-		return false
-	elseif string.match(state.src, "^[%-%d]", state.cursor) then
-		-- potential number
-		return deserializeNumber(state)
-	elseif string.match(state.src, '^"', state.cursor) then
-		return deserializeString(state)
-	elseif string.match(state.src, "^%[", state.cursor) then
-		return deserializeArray(state)
-	elseif string.match(state.src, "^{", state.cursor) then
-		local obj = deserializeObject(state)
-		obj[object_key] = true
-		return obj
+	-- optional leading minus
+	local b = string.byte(src, cursor)
+	if b == 0x2D then
+		cursor += 1
+		b = string.byte(src, cursor)
 	end
 
-	return deserializerError(state, `Unexpected token '{string.sub(state.src, state.cursor, state.cursor)}'`)
+	-- integer part: "0" or [1-9][0-9]*
+	if b == 0x30 then
+		cursor += 1
+		b = string.byte(src, cursor)
+	elseif b and b >= 0x31 and b <= 0x39 then
+		cursor = skipDigits(src, cursor + 1)
+		b = string.byte(src, cursor)
+	else
+		parseError(start, "Malformed number (bad integer part)")
+	end
+
+	-- optional fraction: "." [0-9]+
+	if b == 0x2E then
+		local afterDot = cursor + 1
+		cursor = skipDigits(src, afterDot)
+		if cursor == afterDot then
+			parseError(start, "Malformed number (no fractional digits)")
+		end
+		b = string.byte(src, cursor)
+	end
+
+	-- optional exponent: [eE] [+-]? [0-9]+
+	if b == 0x65 or b == 0x45 then
+		cursor += 1
+		b = string.byte(src, cursor)
+		if b == 0x2B or b == 0x2D then
+			cursor += 1
+		end
+		local expDigitsStart = cursor
+		cursor = skipDigits(src, cursor)
+		if cursor == expDigitsStart then
+			parseError(start, "Malformed number (no exponent digits)")
+		end
+	end
+
+	local n = tonumber(string.sub(src, start, cursor - 1))
+	if not n then
+		parseError(start, "Malformed number")
+	end
+	return cursor, n :: number
+end
+
+-- Forward declarations for the mutually-recursive parsers.
+local parseArray: (string, number) -> (number, Array)
+local parseObject: (string, number) -> (number, Object)
+
+-- parseValueAt: given that we've already peeked at the next byte `b`, parse a
+-- value starting there. Splitting this out from parseValue lets parseObject
+-- and parseArray reuse the byte they already read for the comma/bracket check.
+local function parseValueAt(src: string, cursor: number, b: number?): (number, Value)
+	if b == 0x22 then -- '"'
+		return parseString(src, cursor)
+	elseif b == 0x7B then -- '{'
+		return parseObject(src, cursor)
+	elseif b == 0x5B then -- '['
+		return parseArray(src, cursor)
+	elseif b == 0x74 then -- 't' — match "true" via byte compare to avoid the
+		-- substring allocation that `string.sub` would do.
+		local b1, b2, b3 = string.byte(src, cursor + 1, cursor + 3)
+		if b1 == 0x72 and b2 == 0x75 and b3 == 0x65 then
+			return cursor + 4, true
+		end
+	elseif b == 0x66 then -- 'f' — "false"
+		local b1, b2, b3, b4 = string.byte(src, cursor + 1, cursor + 4)
+		if b1 == 0x61 and b2 == 0x6C and b3 == 0x73 and b4 == 0x65 then
+			return cursor + 5, false
+		end
+	elseif b == 0x6E then -- 'n' — "null"
+		local b1, b2, b3 = string.byte(src, cursor + 1, cursor + 3)
+		if b1 == 0x75 and b2 == 0x6C and b3 == 0x6C then
+			return cursor + 4, json.null
+		end
+	elseif b == 0x2D or (b ~= nil and b >= 0x30 and b <= 0x39) then
+		return parseNumber(src, cursor)
+	end
+
+	parseError(cursor, `Unexpected token '{string.sub(src, cursor, cursor)}'`)
+end
+
+function parseArray(src: string, cursor: number): (number, Array)
+	local b: number?
+	cursor, b = skipWs(src, cursor + 1) -- consume '[' + leading ws
+
+	local out: Array = {}
+
+	if b == 0x5D then -- ']'
+		return cursor + 1, out
+	end
+
+	local i = 0
+	while true do
+		local value
+		cursor, value = parseValueAt(src, cursor, b)
+		i += 1
+		out[i] = value
+
+		cursor, b = skipWs(src, cursor)
+		if b == 0x2C then -- ','
+			cursor, b = skipWs(src, cursor + 1)
+			if b == 0x5D then
+				parseError(cursor, "Trailing comma in array")
+			end
+		elseif b == 0x5D then -- ']'
+			return cursor + 1, out
+		else
+			parseError(cursor, "Expected ',' or ']' after array value")
+		end
+	end
+end
+
+function parseObject(src: string, cursor: number): (number, Object)
+	local b: number?
+	cursor, b = skipWs(src, cursor + 1) -- consume '{' + leading ws
+
+	local out: Object = {}
+	out[object_key] = true
+
+	if b == 0x7D then -- '}'
+		return cursor + 1, out
+	end
+
+	while true do
+		if b ~= 0x22 then
+			parseError(cursor, "Expected a string key")
+		end
+		local key
+		cursor, key = parseString(src, cursor)
+
+		cursor, b = skipWs(src, cursor)
+		if b ~= 0x3A then
+			parseError(cursor, "Expected ':' for key value pair")
+		end
+		cursor, b = skipWs(src, cursor + 1)
+
+		local value
+		cursor, value = parseValueAt(src, cursor, b)
+		out[key] = value
+
+		cursor, b = skipWs(src, cursor)
+		if b == 0x2C then -- ','
+			cursor, b = skipWs(src, cursor + 1)
+		elseif b == 0x7D then -- '}'
+			return cursor + 1, out
+		else
+			parseError(cursor, "Expected ',' or '}' after object value")
+		end
+	end
+end
+
+local function parseValue(src: string, cursor: number): (number, Value)
+	local cur, b = skipWs(src, cursor)
+	return parseValueAt(src, cur, b)
 end
 
 -- user-facing
@@ -594,16 +594,11 @@ end
 
 --- Parses a JSON string and returns the corresponding Luau value. Returns `json.null` for a JSON `null` literal; compare with `json.null` rather than `nil` to check for null.
 function json.deserialize(src: string): (Array | Object | boolean | number | string)?
-	local state = {
-		src = src,
-		cursor = 0,
-	}
+	local cursor, result = parseValue(src, 1)
 
-	local result = deserialize(state)
-
-	-- After parsing a value, there must be no non-whitespace trailing characters.
-	if skipWhitespace(state) then
-		deserializerError(state, "Trailing characters after JSON value")
+	cursor = skipWs(src, cursor)
+	if cursor <= #src then
+		parseError(cursor, "Trailing characters after JSON value")
 	end
 
 	return result

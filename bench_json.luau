@@ -1,4 +1,5 @@
 local json = require("@std/json")
+local fs = require("@std/fs")
 local time = require("@lute/time")
 
 local CATEGORIES = {
@@ -77,7 +78,7 @@ local function buildJson(dataset: { any }, count: number, m: number): string
 	return json.serialize({ count = count, items = items })
 end
 
-local function bench(label: string, datasetSize: number, iters: number)
+local function benchSerialize(label: string, datasetSize: number, iters: number)
 	local dataset = buildDataset(datasetSize)
 
 	-- warmup
@@ -109,9 +110,83 @@ local function bench(label: string, datasetSize: number, iters: number)
 	)
 end
 
+local function benchDeserialize(label: string, datasetSize: number, iters: number)
+	local dataset = buildDataset(datasetSize)
+	local payload = buildJson(dataset, datasetSize, 1)
+	local payloadLen = #payload
+
+	-- warmup
+	for _ = 1, 3 do
+		json.deserialize(payload)
+	end
+
+	local start = time.now()
+	for _ = 1, iters do
+		json.deserialize(payload)
+	end
+	local elapsed = time.since(start)
+
+	local perCall = elapsed / iters
+	local mbPerSec = (payloadLen * iters / 1024 / 1024) / elapsed
+	print(
+		string.format(
+			"%-24s n=%4d  iters=%5d  total=%7.3fs  per-call=%9.3fms  throughput=%6.1f MB/s  bytes/call=%d",
+			label,
+			datasetSize,
+			iters,
+			elapsed,
+			perCall * 1000,
+			mbPerSec,
+			payloadLen
+		)
+	)
+end
+
 print("=== json.serialize benchmark ===")
-bench("tiny", 1, 50000)
-bench("small", 10, 10000)
-bench("medium", 100, 2000)
-bench("large", 1000, 200)
-bench("xlarge", 5000, 40)
+benchSerialize("tiny", 1, 50000)
+benchSerialize("small", 10, 10000)
+benchSerialize("medium", 100, 2000)
+benchSerialize("large", 1000, 200)
+benchSerialize("xlarge", 5000, 40)
+
+print()
+print("=== json.deserialize benchmark (synthetic, compact) ===")
+benchDeserialize("tiny", 1, 50000)
+benchDeserialize("small", 10, 10000)
+benchDeserialize("medium", 100, 2000)
+benchDeserialize("large", 1000, 200)
+benchDeserialize("xlarge", 5000, 40)
+
+-- Real-world payload from disk. Pretty-printed JSON exercises the
+-- whitespace-skipping path differently than the synthetic compact output.
+local function benchDeserializeFile(label: string, path: string, iters: number)
+	local payload = fs.readFileToString(path)
+	local payloadLen = #payload
+
+	for _ = 1, 3 do
+		json.deserialize(payload)
+	end
+
+	local start = time.now()
+	for _ = 1, iters do
+		json.deserialize(payload)
+	end
+	local elapsed = time.since(start)
+
+	local mbPerSec = (payloadLen * iters / 1024 / 1024) / elapsed
+	print(
+		string.format(
+			"%-24s        iters=%5d  total=%7.3fs  per-call=%9.3fms  throughput=%6.1f MB/s  bytes/call=%d",
+			label,
+			iters,
+			elapsed,
+			(elapsed / iters) * 1000,
+			mbPerSec,
+			payloadLen
+		)
+	)
+end
+
+print()
+print("=== json.deserialize benchmark (real dataset.json, pretty-printed) ===")
+benchDeserializeFile("dataset.json", "dataset.json", 5000)
