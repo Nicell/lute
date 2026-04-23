@@ -190,3 +190,5 @@ end
 print()
 print("=== json.deserialize benchmark (real dataset.json, pretty-printed) ===")
 benchDeserializeFile("dataset.json", "dataset.json", 5000)
+print("=== json.deserialize benchmark (real dataset-large.json) ===")
+benchDeserializeFile("dataset.json", "dataset-large.json", 50)
