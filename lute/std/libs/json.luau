@@ -1,4 +1,5 @@
 --!strict
+--!native
 -- @std/json
 -- JSON serialization and deserialization library
 
@@ -54,47 +55,131 @@ end
 
 local null = json.null
 
--- Hot-path: serialize without indentation. The compact serializer threads
--- `(out, n)` through call args/returns to avoid touching a state table on
--- every primitive.
-local serializeCompact: ({ string }, number, (Array | Object | boolean | number | string)?) -> number
+-- Hot-path: serialize without indentation. With native codegen on, raw
+-- `buffer` ops compile to inline machine code while `table.concat` would
+-- pay for an allocation per token plus one large concat at the end. We use a
+-- module-local growable buffer so the inner serializers can stay leaf-style
+-- (only `n` threaded through) without re-passing the buffer everywhere.
+--
+-- Concurrency: `json.serialize` does not yield, so a single serialize call
+-- runs to completion before anything else touches `outBuf`/`outCap`. The
+-- entry point reallocates the buffer per call so the previous payload's
+-- bytes can be GC'd promptly.
+local outBuf: buffer = buffer.create(4096)
+local outCap: number = 4096
 
-local function serializeStringCompact(out: { string }, n: number, str: string): number
-	n += 1
-	if string.find(str, STRING_NEEDS_ESCAPE) then
-		out[n] = '"' .. string.gsub(str, STRING_NEEDS_ESCAPE, STRING_ESCAPES) .. '"'
-	else
-		out[n] = '"' .. str .. '"'
+local function grow(n: number, extra: number)
+	local needed = n + extra
+	local newCap = outCap * 2
+	while newCap < needed do
+		newCap *= 2
 	end
-	return n
+	local newBuf = buffer.create(newCap)
+	buffer.copy(newBuf, 0, outBuf, 0, n)
+	outBuf = newBuf
+	outCap = newCap
 end
 
-local function serializeArrayCompact(out: { string }, n: number, array: Array): number
+local serializeCompact: (number, Value) -> number
+
+local function serializeArrayCompact(n: number, array: Array): number
 	local len = #array
 	if len == 0 then
-		n += 1
-		out[n] = "[]"
-		return n
+		if n + 2 > outCap then
+			grow(n, 2)
+		end
+		buffer.writeu16(outBuf, n, 0x5D5B) -- "[]" (LE: '[' 0x5B, ']' 0x5D)
+		return n + 2
 	end
 
+	if n + 1 > outCap then
+		grow(n, 1)
+	end
+	buffer.writeu8(outBuf, n, 0x5B) -- '['
 	n += 1
-	out[n] = "["
-	n = serializeCompact(out, n, array[1])
 
-	for i = 2, len do
-		n += 1
-		out[n] = ","
-		n = serializeCompact(out, n, array[i])
+	-- Same inlined primitive dispatch used by `serializeTableCompact`. We
+	-- keep them duplicated so both fast paths can write directly into the
+	-- buffer without going through a `writePrimitive` helper.
+	for i = 1, len do
+		if i ~= 1 then
+			if n + 1 > outCap then
+				grow(n, 1)
+			end
+			buffer.writeu8(outBuf, n, 0x2C) -- ','
+			n += 1
+		end
+
+		local value = array[i]
+		local valueType = type(value)
+		if valueType == "string" then
+			local s = value :: string
+			if string.find(s, STRING_NEEDS_ESCAPE) then
+				local escaped = string.gsub(s, STRING_NEEDS_ESCAPE, STRING_ESCAPES)
+				local sl = #escaped
+				if n + sl + 2 > outCap then
+					grow(n, sl + 2)
+				end
+				buffer.writeu8(outBuf, n, 0x22)
+				buffer.writestring(outBuf, n + 1, escaped)
+				buffer.writeu8(outBuf, n + 1 + sl, 0x22)
+				n += sl + 2
+			else
+				local sl = #s
+				if n + sl + 2 > outCap then
+					grow(n, sl + 2)
+				end
+				buffer.writeu8(outBuf, n, 0x22)
+				buffer.writestring(outBuf, n + 1, s)
+				buffer.writeu8(outBuf, n + 1 + sl, 0x22)
+				n += sl + 2
+			end
+		elseif valueType == "number" then
+			local s = tostring(value)
+			local sl = #s
+			if n + sl > outCap then
+				grow(n, sl)
+			end
+			buffer.writestring(outBuf, n, s)
+			n += sl
+		elseif valueType == "boolean" then
+			if value then
+				if n + 4 > outCap then
+					grow(n, 4)
+				end
+				buffer.writestring(outBuf, n, "true")
+				n += 4
+			else
+				if n + 5 > outCap then
+					grow(n, 5)
+				end
+				buffer.writestring(outBuf, n, "false")
+				n += 5
+			end
+		elseif value == null then
+			if n + 4 > outCap then
+				grow(n, 4)
+			end
+			buffer.writestring(outBuf, n, "null")
+			n += 4
+		else
+			n = serializeCompact(n, value)
+		end
 	end
 
-	n += 1
-	out[n] = "]"
-	return n
+	if n + 1 > outCap then
+		grow(n, 1)
+	end
+	buffer.writeu8(outBuf, n, 0x5D) -- ']'
+	return n + 1
 end
 
-local function serializeTableCompact(out: { string }, n: number, object: Object): number
+local function serializeTableCompact(n: number, object: Object): number
+	if n + 1 > outCap then
+		grow(n, 1)
+	end
+	buffer.writeu8(outBuf, n, 0x7B) -- '{'
 	n += 1
-	out[n] = "{"
 
 	local first = true
 	for key, value in object do
@@ -102,62 +187,168 @@ local function serializeTableCompact(out: { string }, n: number, object: Object)
 			continue
 		end
 
+		-- Leading separator: first key gets `"`, subsequent get `,"` as a
+		-- single u16 store. The closing `":` of the key is also one u16.
 		if first then
 			first = false
-		else
+			if n + 1 > outCap then
+				grow(n, 1)
+			end
+			buffer.writeu8(outBuf, n, 0x22) -- '"'
 			n += 1
-			out[n] = ","
+		else
+			if n + 2 > outCap then
+				grow(n, 2)
+			end
+			buffer.writeu16(outBuf, n, 0x222C) -- ',"' (LE: ',' 0x2C, '"' 0x22)
+			n += 2
 		end
 
-		n = serializeStringCompact(out, n, key)
-		n += 1
-		out[n] = ":"
+		local k = key :: string
+		if string.find(k, STRING_NEEDS_ESCAPE) then
+			local escaped = string.gsub(k, STRING_NEEDS_ESCAPE, STRING_ESCAPES)
+			local kl = #escaped
+			if n + kl + 2 > outCap then
+				grow(n, kl + 2)
+			end
+			buffer.writestring(outBuf, n, escaped)
+			n += kl
+		else
+			local kl = #k
+			if n + kl + 2 > outCap then
+				grow(n, kl + 2)
+			end
+			buffer.writestring(outBuf, n, k)
+			n += kl
+		end
+		buffer.writeu16(outBuf, n, 0x3A22) -- '":' (LE: '"' 0x22, ':' 0x3A)
+		n += 2
 
-		-- Inlined primitive dispatch: real-world objects average many small
-		-- leaf values per record, so saving the `serializeCompact` call here
-		-- is worth ~10% on object-heavy payloads.
+		-- Inlined primitive dispatch on the value. Real-world objects are
+		-- mostly small leaf values; saving the helper-function call per
+		-- field measurably helps object-heavy payloads.
 		local valueType = type(value)
 		if valueType == "string" then
-			n = serializeStringCompact(out, n, value :: string)
+			local s = value :: string
+			if string.find(s, STRING_NEEDS_ESCAPE) then
+				local escaped = string.gsub(s, STRING_NEEDS_ESCAPE, STRING_ESCAPES)
+				local sl = #escaped
+				if n + sl + 2 > outCap then
+					grow(n, sl + 2)
+				end
+				buffer.writeu8(outBuf, n, 0x22)
+				buffer.writestring(outBuf, n + 1, escaped)
+				buffer.writeu8(outBuf, n + 1 + sl, 0x22)
+				n += sl + 2
+			else
+				local sl = #s
+				if n + sl + 2 > outCap then
+					grow(n, sl + 2)
+				end
+				buffer.writeu8(outBuf, n, 0x22)
+				buffer.writestring(outBuf, n + 1, s)
+				buffer.writeu8(outBuf, n + 1 + sl, 0x22)
+				n += sl + 2
+			end
 		elseif valueType == "number" then
-			n += 1
-			out[n] = tostring(value)
+			local s = tostring(value)
+			local sl = #s
+			if n + sl > outCap then
+				grow(n, sl)
+			end
+			buffer.writestring(outBuf, n, s)
+			n += sl
 		elseif valueType == "boolean" then
-			n += 1
-			out[n] = if value then "true" else "false"
+			if value then
+				if n + 4 > outCap then
+					grow(n, 4)
+				end
+				buffer.writestring(outBuf, n, "true")
+				n += 4
+			else
+				if n + 5 > outCap then
+					grow(n, 5)
+				end
+				buffer.writestring(outBuf, n, "false")
+				n += 5
+			end
+		elseif value == null then
+			if n + 4 > outCap then
+				grow(n, 4)
+			end
+			buffer.writestring(outBuf, n, "null")
+			n += 4
 		else
-			n = serializeCompact(out, n, value)
+			n = serializeCompact(n, value)
 		end
 	end
 
-	n += 1
-	out[n] = "}"
-	return n
+	if n + 1 > outCap then
+		grow(n, 1)
+	end
+	buffer.writeu8(outBuf, n, 0x7D) -- '}'
+	return n + 1
 end
 
-serializeCompact = function(out: { string }, n: number, value: Value): number
+serializeCompact = function(n: number, value: Value): number
 	local valueType = type(value)
 
 	if valueType == "string" then
-		return serializeStringCompact(out, n, value :: string)
+		local s = value :: string
+		if string.find(s, STRING_NEEDS_ESCAPE) then
+			local escaped = string.gsub(s, STRING_NEEDS_ESCAPE, STRING_ESCAPES)
+			local sl = #escaped
+			if n + sl + 2 > outCap then
+				grow(n, sl + 2)
+			end
+			buffer.writeu8(outBuf, n, 0x22)
+			buffer.writestring(outBuf, n + 1, escaped)
+			buffer.writeu8(outBuf, n + 1 + sl, 0x22)
+			return n + sl + 2
+		else
+			local sl = #s
+			if n + sl + 2 > outCap then
+				grow(n, sl + 2)
+			end
+			buffer.writeu8(outBuf, n, 0x22)
+			buffer.writestring(outBuf, n + 1, s)
+			buffer.writeu8(outBuf, n + 1 + sl, 0x22)
+			return n + sl + 2
+		end
 	elseif valueType == "number" then
-		n += 1
-		out[n] = tostring(value)
-		return n
+		local s = tostring(value)
+		local sl = #s
+		if n + sl > outCap then
+			grow(n, sl)
+		end
+		buffer.writestring(outBuf, n, s)
+		return n + sl
 	elseif valueType == "boolean" then
-		n += 1
-		out[n] = if value then "true" else "false"
-		return n
+		if value then
+			if n + 4 > outCap then
+				grow(n, 4)
+			end
+			buffer.writestring(outBuf, n, "true")
+			return n + 4
+		else
+			if n + 5 > outCap then
+				grow(n, 5)
+			end
+			buffer.writestring(outBuf, n, "false")
+			return n + 5
+		end
 	elseif value == null then
-		n += 1
-		out[n] = "null"
-		return n
+		if n + 4 > outCap then
+			grow(n, 4)
+		end
+		buffer.writestring(outBuf, n, "null")
+		return n + 4
 	elseif valueType == "table" then
 		local t = value :: Array
 		if #t == 0 and next(t :: any) ~= nil then
-			return serializeTableCompact(out, n, value :: Object)
+			return serializeTableCompact(n, value :: Object)
 		else
-			return serializeArrayCompact(out, n, t)
+			return serializeArrayCompact(n, t)
 		end
 	else
 		error("Unknown value", 2)
@@ -166,6 +357,19 @@ end
 
 -- Pretty-print path. Slower; depth is threaded explicitly.
 local serializePretty: ({ string }, number, (Array | Object | boolean | number | string)?, number) -> number
+
+-- Pretty path keeps using `table.concat` since it's the cold path. We need
+-- a small string-quoting helper that writes into the `{ string }` accumulator
+-- (the compact path now uses `buffer` so it can't share its writers).
+local function serializeStringForTable(out: { string }, n: number, str: string): number
+	n += 1
+	if string.find(str, STRING_NEEDS_ESCAPE) then
+		out[n] = '"' .. string.gsub(str, STRING_NEEDS_ESCAPE, STRING_ESCAPES) .. '"'
+	else
+		out[n] = '"' .. str .. '"'
+	end
+	return n
+end
 
 local function serializeArrayPretty(out: { string }, n: number, array: Array, depth: number): number
 	local len = #array
@@ -225,7 +429,7 @@ local function serializeTablePretty(out: { string }, n: number, object: Object, 
 		n += 1
 		out[n] = inner
 
-		n = serializeStringCompact(out, n, key)
+		n = serializeStringForTable(out, n, key)
 
 		n += 1
 		out[n] = ": "
@@ -251,7 +455,7 @@ serializePretty = function(out: { string }, n: number, value: Value, depth: numb
 	local valueType = type(value)
 
 	if valueType == "string" then
-		return serializeStringCompact(out, n, value :: string)
+		return serializeStringForTable(out, n, value :: string)
 	elseif valueType == "number" then
 		n += 1
 		out[n] = tostring(value)
@@ -583,13 +787,21 @@ end
 
 --- Serializes `value` to a JSON string. If `prettyPrint` is `true`, the output is indented for readability.
 function json.serialize(value: Value, prettyPrint: boolean?): string
-	local out = {}
 	if prettyPrint then
+		local out = {}
 		serializePretty(out, 0, value, 0)
-	else
-		serializeCompact(out, 0, value)
+		return table.concat(out)
 	end
-	return table.concat(out)
+
+	-- Reset the scratch buffer to a small starting size so very large prior
+	-- payloads don't keep their memory pinned forever, but still let the
+	-- common steady-state case avoid allocations.
+	if outCap > 65536 then
+		outBuf = buffer.create(4096)
+		outCap = 4096
+	end
+	local n = serializeCompact(0, value)
+	return buffer.readstring(outBuf, 0, n)
 end
 
 --- Parses a JSON string and returns the corresponding Luau value. Returns `json.null` for a JSON `null` literal; compare with `json.null` rather than `nil` to check for null.
