@@ -331,6 +331,17 @@ int handleRunCommand(int argc, char** argv, int argOffset, bool packageAwareness
         return 1;
     }
 
+    if (!isAbsolutePath(validPath))
+    {
+        std::optional<std::string> cwd = getCurrentWorkingDirectory();
+        if (!cwd)
+        {
+            reporter.reportError("Error: Failed to get current working directory.\n");
+            return 1;
+        }
+        validPath = normalizePath(joinPaths(*cwd, validPath));
+    }
+
     std::optional<ProfileOptions> profileOptions;
     if (enableProfiling)
     {
@@ -359,17 +370,6 @@ int handleRunCommand(int argc, char** argv, int argOffset, bool packageAwareness
 
     if (packageAwareness)
     {
-        if (!isAbsolutePath(validPath))
-        {
-            std::optional<std::string> cwd = getCurrentWorkingDirectory();
-            if (!cwd)
-            {
-                reporter.reportError("Error: Failed to get current working directory.\n");
-                return 1;
-            }
-            validPath = normalizePath(joinPaths(*cwd, validPath));
-        }
-
         std::optional<std::string> lockfile = getAbsolutePathToNearestLockfile(validPath);
         if (!lockfile)
         {
@@ -383,6 +383,23 @@ int handleRunCommand(int argc, char** argv, int argOffset, bool packageAwareness
     else
     {
         setupRunState(runtime);
+    }
+
+    std::vector<std::string> resolvedProgramArgs;
+    std::vector<char*> resolvedProgramArgv;
+    if (program_argc > 0 && program_argv != nullptr)
+    {
+        resolvedProgramArgs.reserve(program_argc);
+        resolvedProgramArgv.reserve(program_argc);
+
+        resolvedProgramArgs.push_back(validPath);
+        for (int i = 1; i < program_argc; ++i)
+            resolvedProgramArgs.emplace_back(program_argv[i]);
+
+        for (std::string& arg : resolvedProgramArgs)
+            resolvedProgramArgv.push_back(arg.data());
+
+        program_argv = resolvedProgramArgv.data();
     }
 
     bool success = runFile(runtime, validPath.c_str(), program_argc, program_argv, reporter, profileOptions);

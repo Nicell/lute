@@ -37,4 +37,46 @@ test.suite("LuteRun", function(suite)
 		)
 		assert.strNotContains(result.stdout, "Hello world")
 	end)
+
+	suite:case("scriptReceivesResolvedPathAsFirstArgument", function(assert)
+		fs.createDirectory(rundir)
+		fs.createDirectory(pathlib.join(rundir, ".lute"))
+
+		local scriptPath = pathlib.join(rundir, ".lute", "example.luau")
+		fs.writeStringToFile(
+			scriptPath,
+			[[
+			local io = require("@std/io")
+			local process = require("@std/process")
+			local args = { ... }
+
+			io.write(args[1] .. "\n")
+			io.write(args[2] .. "\n")
+			io.write(process.args[1] .. "\n")
+			io.write(process.args[2])
+		]]
+		)
+
+		local explicitScriptPath = pathlib.format(pathlib.join(".lute", "example.luau"))
+		local resolvedScriptPaths = {}
+		local expectedSuffix = pathlib.format(pathlib.join(".lute", "example.luau"))
+
+		for _, commandScriptPath in { "example", explicitScriptPath } do
+			local result = process.run(
+				{ lutePath, "run", commandScriptPath, "extra" },
+				{ cwd = pathlib.format(rundir) }
+			)
+			local output = result.stdout:split("\n")
+
+			assert.eq(result.exitcode, 0)
+			assert.eq(output[1], output[3])
+			assert.eq(output[2], "extra")
+			assert.eq(output[4], "extra")
+			assert.eq(output[1]:sub(-#expectedSuffix), expectedSuffix)
+
+			table.insert(resolvedScriptPaths, output[1])
+		end
+
+		assert.eq(resolvedScriptPaths[1], resolvedScriptPaths[2])
+	end)
 end)
