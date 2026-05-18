@@ -37,6 +37,7 @@ struct ThreadToContinue
 struct ThreadCompletionHandler
 {
     std::function<void(lua_State* L, int status)> onFinish;
+    bool consumesErrors = true;
 };
 
 struct StepErr
@@ -143,7 +144,7 @@ private:
 
     std::mutex continuationMutex;
     std::vector<std::function<void()>> continuations;
-    std::unordered_map<lua_State*, ThreadCompletionHandler> threadCompletionHandlers;
+    std::unordered_map<lua_State*, std::vector<ThreadCompletionHandler>> threadCompletionHandlers;
 
     std::atomic<bool> stop;
     std::condition_variable runLoopCv;
