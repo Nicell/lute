@@ -256,6 +256,114 @@ test.suite("NetTestSuite", function(suite)
 		instance.close()
 	end)
 
+	suite:case("postRequestBodyIsCachedAndPreservesNul", function(assert)
+		local payload = "hello\0world"
+		local instance = server.serve({
+			port = 0,
+			handler = function(req: server.ReceivedRequest): server.ServerResponse
+				local first = req.body
+				local second = req.body
+				assert.eq(first, second)
+				return { status = 200, body = second }
+			end,
+		})
+
+		local response = net.request(`http://{instance.hostname}:{instance.port}/`, {
+			method = "POST",
+			body = payload,
+		})
+
+		assert.eq(payload, response.body)
+		instance.close()
+	end)
+
+	suite:case("handlerCanIgnorePostBody", function(assert)
+		local instance = server.serve({
+			port = 0,
+			handler = function(_req: server.ReceivedRequest): server.ServerResponse
+				return { status = 200, body = "ignored" }
+			end,
+		})
+
+		local response = net.request(`http://{instance.hostname}:{instance.port}/`, {
+			method = "POST",
+			body = string.rep("x", 1024 * 64),
+		})
+
+		assert.eq(true, response.ok)
+		assert.eq("ignored", response.body)
+		instance.close()
+	end)
+
+	suite:case("responseBodyIsCachedAndPreservesNul", function(assert)
+		local payload = "hello\0client"
+		local instance = server.serve({
+			port = 0,
+			handler = function(_req: server.ReceivedRequest): server.ServerResponse
+				return { status = 200, body = payload }
+			end,
+		})
+
+		local response = net.request(`http://{instance.hostname}:{instance.port}/`)
+		local first = response.body
+		local second = response.body
+
+		assert.eq(first, second)
+		assert.eq(payload, second)
+		instance.close()
+	end)
+
+	suite:case("responseBodyCanRemainUnread", function(assert)
+		local instance = server.serve({
+			port = 0,
+			handler = function(_req: server.ReceivedRequest): server.ServerResponse
+				return {
+					status = 200,
+					body = string.rep("z", 1024 * 64),
+					headers = {
+						["X-Unread"] = "ok",
+					},
+				}
+			end,
+		})
+
+		local response = net.request(`http://{instance.hostname}:{instance.port}/`)
+
+		assert.eq(200, response.status)
+		assert.eq("ok", response.headers["X-Unread"])
+		instance.close()
+	end)
+
+	suite:case("responseBodyCanBeReadAfterRequestThreadFinishes", function(assert)
+		local instance = server.serve({
+			port = 0,
+			handler = function(_req: server.ReceivedRequest): server.ServerResponse
+				return {
+					status = 200,
+					body = "late-reader",
+				}
+			end,
+		})
+
+		local saved: net.Response? = nil
+		local done = false
+
+		task.spawn(function()
+			saved = net.request(`http://{instance.hostname}:{instance.port}/`)
+			done = true
+		end)
+
+		local start = time.now()
+		while not done and time.since(start) < 5 do
+			task.wait()
+		end
+
+		assert.eq(true, done)
+		assert.neq(nil, saved)
+		assert.eq("late-reader", (saved :: net.Response).body)
+		instance.close()
+	end)
+
 	suite:case("requestHeadersAreForwarded", function(assert)
 		local instance = server.serve({
 			port = 0,

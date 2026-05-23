@@ -8,6 +8,8 @@
 
 #include "curl/curl.h"
 
+#include <cctype>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <string>
@@ -37,17 +39,53 @@ struct CurlResponse
 };
 
 struct CurlMultiManager;
+struct ClientBodyState;
+static void resumeClientBody(const std::shared_ptr<ClientBodyState>& bodyState);
+
+enum class ClientBodyStatus
+{
+    NotRequested,
+    Buffering,
+    Complete,
+    Canceled,
+    Errored,
+};
+
+struct ClientBodyState
+{
+    Runtime* runtime = nullptr;
+    CurlMultiManager* manager = nullptr;
+    CURL* easy = nullptr;
+    ClientBodyStatus status = ClientBodyStatus::NotRequested;
+    std::vector<char> body;
+    Luau::DenseHashMap<std::string, std::string> headers;
+    long responseStatus = 0;
+    std::string error;
+
+    ClientBodyState()
+        : headers(kEmptyHeaderKey)
+    {
+    }
+
+    ~ClientBodyState();
+};
 
 struct HttpRequestState
 {
     CURL* easy = nullptr;
+    CurlMultiManager* manager = nullptr;
     curl_slist* headerList = nullptr;
     std::string url;
     std::string method;
     std::string body;
     CurlResponse response;
+    CurlResponse currentHeaderBlock;
     char errorBuffer[CURL_ERROR_SIZE] = {};
     ResumeToken token;
+    std::shared_ptr<ClientBodyState> bodyState;
+    bool responseDelivered = false;
+    bool receivePaused = false;
+    bool currentHeaderHasLocation = false;
 
     ~HttpRequestState()
     {
@@ -73,47 +111,159 @@ static size_t writeFunction(char* ptr, size_t size, size_t nmemb, void* userdata
     auto* state = static_cast<HttpRequestState*>(userdata);
     LUTE_ASSERT(state);
 
-    std::vector<char>* target = &state->response.body;
+    std::vector<char>* target = state->bodyState ? &state->bodyState->body : &state->response.body;
     LUTE_ASSERT(target);
 
     size_t fullsize = size * nmemb;
+    if (state->bodyState && state->bodyState->status == ClientBodyStatus::NotRequested)
+    {
+        state->receivePaused = true;
+        return CURL_WRITEFUNC_PAUSE;
+    }
+
     target->insert(target->end(), ptr, ptr + fullsize);
     return fullsize;
 }
 
-static void collectResponseHeaders(HttpRequestState& state)
+static std::string trimHeaderValue(std::string_view value)
 {
-    curl_header* prev = nullptr;
-    curl_header* h;
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
+        value.remove_prefix(1);
 
-    while ((h = curl_easy_nextheader(state.easy, CURLH_HEADER, -1, prev)))
-    {
-        std::string name = h->name;
-        std::string value = h->value;
+    while (!value.empty() && (value.back() == '\r' || value.back() == '\n' || value.back() == ' ' || value.back() == '\t'))
+        value.remove_suffix(1);
 
-        if (state.response.headers.contains(name))
-        {
-            state.response.headers[name] += ", " + value;
-        }
-        else
-        {
-            state.response.headers[name] = value;
-        }
-        prev = h;
-    }
+    return std::string(value);
 }
 
-static int pushResponse(lua_State* L, CurlResponse resp)
+static bool headerNameEquals(const std::string& lhs, std::string_view rhs)
+{
+    if (lhs.size() != rhs.size())
+        return false;
+
+    for (size_t i = 0; i < lhs.size(); ++i)
+    {
+        if (std::tolower(static_cast<unsigned char>(lhs[i])) != rhs[i])
+            return false;
+    }
+
+    return true;
+}
+
+static bool hasContentLengthZero(const Luau::DenseHashMap<std::string, std::string>& headers)
+{
+    for (const auto& header : headers)
+    {
+        if (!headerNameEquals(header.first, "content-length"))
+            continue;
+
+        bool sawDigit = false;
+        for (unsigned char ch : header.second)
+        {
+            if (!std::isdigit(ch))
+                continue;
+
+            sawDigit = true;
+            if (ch != '0')
+                return false;
+        }
+
+        if (sawDigit)
+            return true;
+    }
+
+    return false;
+}
+
+static bool responseHasNoBody(const HttpRequestState& state)
+{
+    long status = state.response.status;
+    return state.method == "HEAD" || status == 204 || status == 304 || hasContentLengthZero(state.response.headers);
+}
+
+static void rawSetBodyField(lua_State* L, int tableIndex, const std::vector<char>& body)
+{
+    tableIndex = lua_absindex(L, tableIndex);
+    lua_pushstring(L, "body");
+    lua_pushlstring(L, body.empty() ? "" : body.data(), body.size());
+    lua_rawset(L, tableIndex);
+}
+
+static void completeClientBody(const std::shared_ptr<ClientBodyState>& bodyState)
+{
+    if (!bodyState || bodyState->status == ClientBodyStatus::Complete)
+        return;
+
+    bodyState->status = ClientBodyStatus::Complete;
+    bodyState->manager = nullptr;
+    bodyState->easy = nullptr;
+}
+
+static void failClientBody(const std::shared_ptr<ClientBodyState>& bodyState, std::string error, ClientBodyStatus status = ClientBodyStatus::Errored)
+{
+    if (!bodyState || bodyState->status == ClientBodyStatus::Complete || bodyState->status == ClientBodyStatus::Canceled ||
+        bodyState->status == ClientBodyStatus::Errored)
+    {
+        return;
+    }
+
+    bodyState->status = status;
+    bodyState->error = std::move(error);
+    bodyState->manager = nullptr;
+    bodyState->easy = nullptr;
+}
+
+static int response_body_index(lua_State* L)
+{
+    if (!lua_isstring(L, 2))
+        return 0;
+
+    const char* key = lua_tostring(L, 2);
+    if (strcmp(key, "body") != 0)
+        return 0;
+
+    auto* storage = static_cast<std::shared_ptr<ClientBodyState>*>(lua_touserdata(L, lua_upvalueindex(1)));
+    if (!storage || !(*storage))
+        luaL_error(L, "response body state is unavailable");
+
+    std::shared_ptr<ClientBodyState> bodyState = *storage;
+
+    if (bodyState->status == ClientBodyStatus::Complete)
+    {
+        rawSetBodyField(L, 1, bodyState->body);
+        lua_pushlstring(L, bodyState->body.empty() ? "" : bodyState->body.data(), bodyState->body.size());
+        return 1;
+    }
+
+    if (bodyState->status == ClientBodyStatus::Canceled || bodyState->status == ClientBodyStatus::Errored)
+        luaL_error(L, "%s", bodyState->error.empty() ? "response body is unavailable" : bodyState->error.c_str());
+
+    if (bodyState->status == ClientBodyStatus::NotRequested)
+    {
+        bodyState->status = ClientBodyStatus::Buffering;
+        resumeClientBody(bodyState);
+    }
+
+    while (bodyState->status == ClientBodyStatus::Buffering && bodyState->runtime && bodyState->runtime->hasWork())
+        bodyState->runtime->runOnce();
+
+    if (bodyState->status == ClientBodyStatus::Complete)
+    {
+        rawSetBodyField(L, 1, bodyState->body);
+        lua_pushlstring(L, bodyState->body.empty() ? "" : bodyState->body.data(), bodyState->body.size());
+        return 1;
+    }
+
+    luaL_error(L, "%s", bodyState->error.empty() ? "response body is unavailable" : bodyState->error.c_str());
+}
+
+static int pushResponse(lua_State* L, const std::shared_ptr<ClientBodyState>& bodyState)
 {
     lua_createtable(L, 0, 4);
 
-    lua_pushstring(L, "body");
-    lua_pushlstring(L, resp.body.empty() ? "" : resp.body.data(), resp.body.size());
-    lua_settable(L, -3);
-
     lua_pushstring(L, "headers");
-    lua_createtable(L, 0, resp.headers.size());
-    for (const auto& header : resp.headers)
+    lua_createtable(L, 0, bodyState->headers.size());
+    for (const auto& header : bodyState->headers)
     {
         lua_pushlstring(L, header.first.data(), header.first.size());
         lua_pushlstring(L, header.second.data(), header.second.size());
@@ -122,14 +272,137 @@ static int pushResponse(lua_State* L, CurlResponse resp)
     lua_settable(L, -3);
 
     lua_pushstring(L, "status");
-    lua_pushinteger(L, resp.status);
+    lua_pushinteger(L, bodyState->responseStatus);
     lua_settable(L, -3);
 
     lua_pushstring(L, "ok");
-    lua_pushboolean(L, (resp.status >= 200 && resp.status < 300));
+    lua_pushboolean(L, (bodyState->responseStatus >= 200 && bodyState->responseStatus < 300));
     lua_settable(L, -3);
 
+    int responseIndex = lua_absindex(L, -1);
+    lua_createtable(L, 0, 1);
+    lua_pushstring(L, "__index");
+    auto* storage = new (lua_newuserdatadtor(
+        L,
+        sizeof(std::shared_ptr<ClientBodyState>),
+        [](void* ptr)
+        {
+            std::destroy_at(static_cast<std::shared_ptr<ClientBodyState>*>(ptr));
+        }
+    )) std::shared_ptr<ClientBodyState>(bodyState);
+    (void)storage;
+    lua_pushcclosure(L, response_body_index, "response.__index", 1);
+    lua_settable(L, -3);
+    lua_setmetatable(L, responseIndex);
+
     return 1;
+}
+
+static bool parseStatusLine(std::string_view line, long& status)
+{
+    if (line.rfind("HTTP/", 0) != 0)
+        return false;
+
+    size_t firstSpace = line.find(' ');
+    if (firstSpace == std::string_view::npos)
+        return false;
+
+    while (firstSpace < line.size() && line[firstSpace] == ' ')
+        firstSpace++;
+
+    long parsed = 0;
+    size_t digits = 0;
+    while (firstSpace + digits < line.size() && std::isdigit(static_cast<unsigned char>(line[firstSpace + digits])))
+    {
+        parsed = parsed * 10 + (line[firstSpace + digits] - '0');
+        digits++;
+    }
+
+    if (digits != 3)
+        return false;
+
+    status = parsed;
+    return true;
+}
+
+static bool isRedirectWithLocation(const HttpRequestState& state)
+{
+    return state.currentHeaderBlock.status >= 300 && state.currentHeaderBlock.status < 400 && state.currentHeaderHasLocation;
+}
+
+static size_t headerFunction(char* ptr, size_t size, size_t nmemb, void* userdata)
+{
+    auto* state = static_cast<HttpRequestState*>(userdata);
+    LUTE_ASSERT(state);
+
+    size_t fullsize = size * nmemb;
+    std::string_view line(ptr, fullsize);
+
+    long status = 0;
+    if (parseStatusLine(line, status))
+    {
+        state->currentHeaderBlock = CurlResponse();
+        state->currentHeaderBlock.status = status;
+        state->currentHeaderHasLocation = false;
+        return fullsize;
+    }
+
+    if (line == "\r\n" || line == "\n")
+    {
+        if (state->responseDelivered || state->currentHeaderBlock.status == 0 || state->currentHeaderBlock.status < 200 ||
+            isRedirectWithLocation(*state))
+        {
+            return fullsize;
+        }
+
+        state->response = std::move(state->currentHeaderBlock);
+        state->bodyState->headers = state->response.headers;
+        state->bodyState->responseStatus = state->response.status;
+        state->bodyState->manager = state->manager;
+        state->bodyState->easy = state->easy;
+
+        state->responseDelivered = true;
+
+        bool noBody = responseHasNoBody(*state);
+        if (noBody)
+        {
+            completeClientBody(state->bodyState);
+        }
+        else
+        {
+            CURLcode pauseResult = curl_easy_pause(state->easy, CURLPAUSE_RECV);
+            if (pauseResult == CURLE_OK)
+            {
+                state->receivePaused = true;
+            }
+        }
+
+        state->token->complete(
+            [bodyState = state->bodyState](lua_State* L)
+            {
+                return pushResponse(L, bodyState);
+            }
+        );
+
+        return fullsize;
+    }
+
+    size_t colon = line.find(':');
+    if (colon == std::string_view::npos)
+        return fullsize;
+
+    std::string name(line.data(), colon);
+    std::string value = trimHeaderValue(line.substr(colon + 1));
+
+    if (headerNameEquals(name, "location"))
+        state->currentHeaderHasLocation = true;
+
+    if (state->currentHeaderBlock.headers.contains(name))
+        state->currentHeaderBlock.headers[name] += ", " + value;
+    else
+        state->currentHeaderBlock.headers[name] = value;
+
+    return fullsize;
 }
 
 struct CurlMultiManager
@@ -186,6 +459,12 @@ struct CurlMultiManager
         }
 
         CURL* easy = state->easy;
+        state->manager = this;
+        if (state->bodyState)
+        {
+            state->bodyState->manager = this;
+            state->bodyState->easy = easy;
+        }
         requests[easy] = std::move(state);
 
         CURLMcode result = curl_multi_add_handle(multi, easy);
@@ -248,22 +527,96 @@ struct CurlMultiManager
         if (result != CURLE_OK)
         {
             std::string error = state->errorBuffer[0] != '\0' ? state->errorBuffer : curl_easy_strerror(result);
-            state->token->fail("network request failed: " + error);
+            if (state->responseDelivered)
+                failClientBody(state->bodyState, "network request failed: " + error);
+            else
+                state->token->fail("network request failed: " + error);
         }
         else
         {
-            curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &state->response.status);
-            collectResponseHeaders(*state);
+            if (!state->responseDelivered)
+            {
+                curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &state->response.status);
+                state->bodyState->headers = state->response.headers;
+                state->bodyState->responseStatus = state->response.status;
+                state->bodyState->body = std::move(state->response.body);
+                completeClientBody(state->bodyState);
 
-            state->token->complete(
-                [resp = std::move(state->response)](lua_State* L) mutable
-                {
-                    return pushResponse(L, std::move(resp));
-                }
-            );
+                state->token->complete(
+                    [bodyState = state->bodyState](lua_State* L)
+                    {
+                        return pushResponse(L, bodyState);
+                    }
+                );
+            }
+            else
+            {
+                completeClientBody(state->bodyState);
+            }
+        }
+
+        if (state->bodyState)
+        {
+            state->bodyState->manager = nullptr;
+            state->bodyState->easy = nullptr;
         }
 
         maybeDestroyWhenIdle();
+    }
+
+    void cancelRequest(CURL* easy, std::string error)
+    {
+        auto it = requests.find(easy);
+        if (it == requests.end())
+            return;
+
+        if (multi)
+            curl_multi_remove_handle(multi, easy);
+
+        std::unique_ptr<HttpRequestState> state = std::move(it->second);
+        requests.erase(it);
+
+        if (state->bodyState)
+        {
+            state->bodyState->status = ClientBodyStatus::Canceled;
+            state->bodyState->error = std::move(error);
+            state->bodyState->manager = nullptr;
+            state->bodyState->easy = nullptr;
+        }
+
+        maybeDestroyWhenIdle();
+    }
+
+    void resumeBody(ClientBodyState* bodyState)
+    {
+        if (!bodyState || !bodyState->easy)
+            return;
+
+        auto it = requests.find(bodyState->easy);
+        if (it == requests.end())
+        {
+            bodyState->status = ClientBodyStatus::Errored;
+            bodyState->error = "network response body is unavailable";
+            bodyState->manager = nullptr;
+            bodyState->easy = nullptr;
+            return;
+        }
+
+        HttpRequestState* state = it->second.get();
+        if (state->receivePaused)
+        {
+            state->receivePaused = false;
+            CURLcode pauseResult = curl_easy_pause(bodyState->easy, CURLPAUSE_RECV_CONT);
+            if (pauseResult != CURLE_OK)
+            {
+                CURL* easy = bodyState->easy;
+                failClientBody(state->bodyState, std::string("network request failed: ") + curl_easy_strerror(pauseResult));
+                cancelRequest(easy, "network request cancelled");
+                return;
+            }
+        }
+
+        socketAction(CURL_SOCKET_TIMEOUT, 0);
     }
 
     CurlSocketState* createSocketState(curl_socket_t socket)
@@ -373,7 +726,12 @@ struct CurlMultiManager
         requests.clear();
 
         for (auto& request : pending)
-            request->token->fail(error);
+        {
+            if (request->responseDelivered)
+                failClientBody(request->bodyState, error);
+            else
+                request->token->fail(error);
+        }
 
         maybeDestroyWhenIdle();
     }
@@ -509,6 +867,23 @@ void CurlMultiManager::maybeDestroyWhenIdle()
     beginClose(true);
 }
 
+ClientBodyState::~ClientBodyState()
+{
+    if (manager && easy && status == ClientBodyStatus::NotRequested)
+        manager->cancelRequest(easy, "network response body was not read");
+}
+
+static void resumeClientBody(const std::shared_ptr<ClientBodyState>& bodyState)
+{
+    if (!bodyState || !bodyState->manager || !bodyState->easy)
+    {
+        failClientBody(bodyState, "network response body is unavailable");
+        return;
+    }
+
+    bodyState->manager->resumeBody(bodyState.get());
+}
+
 static CurlMultiManager* getCurlMultiManager(Runtime* runtime, std::string& error)
 {
     auto it = curlManagers.find(runtime);
@@ -586,9 +961,14 @@ static std::unique_ptr<HttpRequestState> createRequestState(
     state->method = std::move(method);
     state->body = std::move(body);
     state->token = std::move(token);
+    state->bodyState = std::make_shared<ClientBodyState>();
+    state->bodyState->runtime = state->token->runtime;
+    state->bodyState->easy = curl;
 
     curl_easy_setopt(curl, CURLOPT_URL, state->url.c_str());
     curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, state->errorBuffer);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerFunction);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, state.get());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeFunction);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, state.get());
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, kDefaultRequestTimeoutMs);
@@ -704,6 +1084,14 @@ int request(lua_State* L)
         token->fail("network request failed: " + error);
         return lua_yield(L, 0);
     }
+
+    ThreadCompletionHandler cleanup;
+    cleanup.consumesErrors = false;
+    cleanup.onFinish = [](lua_State* L, int)
+    {
+        lua_gc(L, LUA_GCCOLLECT, 0);
+    };
+    token->runtime->addThreadCompletionHandler(L, std::move(cleanup));
 
     CurlMultiManager* manager = getCurlMultiManager(token->runtime, error);
     if (!manager)

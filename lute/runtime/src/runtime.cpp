@@ -234,7 +234,7 @@ bool Runtime::hasThreads()
 
 void Runtime::addThreadCompletionHandler(lua_State* L, ThreadCompletionHandler completion)
 {
-    threadCompletionHandlers[L] = std::move(completion);
+    threadCompletionHandlers[L].push_back(std::move(completion));
 }
 
 bool Runtime::runThreadCompletionHandler(lua_State* L, int status)
@@ -243,13 +243,18 @@ bool Runtime::runThreadCompletionHandler(lua_State* L, int status)
     if (it == threadCompletionHandlers.end())
         return false;
 
-    ThreadCompletionHandler completion = std::move(it->second);
+    std::vector<ThreadCompletionHandler> completions = std::move(it->second);
     clearThreadCompletionHandler(L);
 
-    if (completion.onFinish)
-        completion.onFinish(L, status);
+    bool consumedError = false;
+    for (ThreadCompletionHandler& completion : completions)
+    {
+        consumedError = consumedError || completion.consumesErrors;
+        if (completion.onFinish)
+            completion.onFinish(L, status);
+    }
 
-    return true;
+    return consumedError;
 }
 
 void Runtime::clearThreadCompletionHandler(lua_State* L)

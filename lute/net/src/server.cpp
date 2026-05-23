@@ -83,6 +83,31 @@ struct RequestRouteData
 
 using RequestHeaders = std::vector<std::pair<std::string, std::string>>;
 
+enum class RequestBodyStatus
+{
+    NotRequested,
+    Buffering,
+    Complete,
+    Aborted,
+    Errored,
+};
+
+struct RequestBodyState
+{
+    Runtime* runtime = nullptr;
+    RequestBodyStatus status = RequestBodyStatus::NotRequested;
+    std::vector<char> body;
+    bool unreadBodyMayRemain = false;
+    std::string error;
+    std::function<void()> resumeReads;
+    std::function<void()> clearBodyCallback;
+};
+
+struct HttpResponseState
+{
+    std::atomic<bool> aborted{false};
+};
+
 template<typename ReqT>
 static RequestHeaders extractRequestHeaders(ReqT* req)
 {
@@ -122,6 +147,40 @@ static RequestRouteData extractRequestRouteData(ReqT* req)
     return route;
 }
 
+static bool headerNameEquals(const std::string& lhs, std::string_view rhs)
+{
+    if (lhs.size() != rhs.size())
+        return false;
+
+    for (size_t i = 0; i < lhs.size(); ++i)
+    {
+        if (std::tolower(static_cast<unsigned char>(lhs[i])) != rhs[i])
+            return false;
+    }
+
+    return true;
+}
+
+static bool requestBodyMayRemain(const RequestHeaders& headers)
+{
+    for (const auto& [key, value] : headers)
+    {
+        if (headerNameEquals(key, "transfer-encoding"))
+            return true;
+
+        if (headerNameEquals(key, "content-length"))
+        {
+            for (char ch : value)
+            {
+                if (ch >= '1' && ch <= '9')
+                    return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 static void parseQuery(const std::string_view& query, lua_State* L)
 {
     lua_createtable(L, 0, 0);
@@ -151,6 +210,120 @@ static void parseQuery(const std::string_view& query, lua_State* L)
     }
 }
 
+static void rawSetBodyField(lua_State* L, int tableIndex, const std::vector<char>& body)
+{
+    tableIndex = lua_absindex(L, tableIndex);
+    lua_pushstring(L, "body");
+    lua_pushlstring(L, body.empty() ? "" : body.data(), body.size());
+    lua_rawset(L, tableIndex);
+}
+
+static void completeRequestBody(const std::shared_ptr<RequestBodyState>& bodyState)
+{
+    if (!bodyState || bodyState->status == RequestBodyStatus::Complete)
+        return;
+
+    bodyState->status = RequestBodyStatus::Complete;
+    bodyState->unreadBodyMayRemain = false;
+}
+
+static void failRequestBody(const std::shared_ptr<RequestBodyState>& bodyState, std::string error, RequestBodyStatus status)
+{
+    if (!bodyState || bodyState->status == RequestBodyStatus::Complete || bodyState->status == RequestBodyStatus::Aborted ||
+        bodyState->status == RequestBodyStatus::Errored)
+    {
+        return;
+    }
+
+    bodyState->status = status;
+    bodyState->error = std::move(error);
+    bodyState->unreadBodyMayRemain = false;
+}
+
+static void receiveRequestBodyChunk(const std::shared_ptr<RequestBodyState>& bodyState, std::string_view data, bool last)
+{
+    if (!bodyState || bodyState->status == RequestBodyStatus::Complete || bodyState->status == RequestBodyStatus::Aborted ||
+        bodyState->status == RequestBodyStatus::Errored)
+    {
+        return;
+    }
+
+    if (!data.empty())
+        bodyState->body.insert(bodyState->body.end(), data.begin(), data.end());
+
+    if (!last)
+    {
+        bodyState->unreadBodyMayRemain = true;
+        return;
+    }
+
+    bodyState->unreadBodyMayRemain = false;
+
+    completeRequestBody(bodyState);
+}
+
+static bool shouldCloseForUnreadBody(const std::shared_ptr<RequestBodyState>& bodyState)
+{
+    return bodyState && bodyState->status == RequestBodyStatus::NotRequested && bodyState->unreadBodyMayRemain;
+}
+
+static int request_index(lua_State* L)
+{
+    if (!lua_isstring(L, 2))
+        return 0;
+
+    const char* key = lua_tostring(L, 2);
+
+    if (strcmp(key, "upgrade") == 0)
+    {
+        if (!lua_getmetatable(L, 1))
+            return 0;
+
+        lua_pushlightuserdata(L, &kRequestUpgradeKey);
+        lua_rawget(L, -2);
+        lua_remove(L, -2);
+        return lua_isfunction(L, -1) ? 1 : 0;
+    }
+
+    if (strcmp(key, "body") != 0)
+        return 0;
+
+    auto* storage = static_cast<std::shared_ptr<RequestBodyState>*>(lua_touserdata(L, lua_upvalueindex(1)));
+    if (!storage || !(*storage))
+        luaL_error(L, "request body state is unavailable");
+
+    std::shared_ptr<RequestBodyState> bodyState = *storage;
+
+    if (bodyState->status == RequestBodyStatus::Complete)
+    {
+        rawSetBodyField(L, 1, bodyState->body);
+        lua_pushlstring(L, bodyState->body.empty() ? "" : bodyState->body.data(), bodyState->body.size());
+        return 1;
+    }
+
+    if (bodyState->status == RequestBodyStatus::Aborted || bodyState->status == RequestBodyStatus::Errored)
+        luaL_error(L, "%s", bodyState->error.empty() ? "request body is unavailable" : bodyState->error.c_str());
+
+    if (bodyState->status == RequestBodyStatus::NotRequested)
+    {
+        bodyState->status = RequestBodyStatus::Buffering;
+        if (bodyState->resumeReads)
+            bodyState->resumeReads();
+    }
+
+    while (bodyState->status == RequestBodyStatus::Buffering && bodyState->runtime && bodyState->runtime->hasWork())
+        bodyState->runtime->runOnce();
+
+    if (bodyState->status == RequestBodyStatus::Complete)
+    {
+        rawSetBodyField(L, 1, bodyState->body);
+        lua_pushlstring(L, bodyState->body.empty() ? "" : bodyState->body.data(), bodyState->body.size());
+        return 1;
+    }
+
+    luaL_error(L, "%s", bodyState->error.empty() ? "request body is unavailable" : bodyState->error.c_str());
+}
+
 static void pushHeadersTable(const RequestHeaders& headers, lua_State* L)
 {
     lua_createtable(L, 0, int(headers.size()));
@@ -162,7 +335,7 @@ static void pushHeadersTable(const RequestHeaders& headers, lua_State* L)
     }
 }
 
-static void handleResponse(auto* res, lua_State* L, int responseIndex)
+static void handleResponse(auto* res, lua_State* L, int responseIndex, bool closeConnection = false)
 {
     if (lua_isstring(L, responseIndex))
     {
@@ -170,14 +343,14 @@ static void handleResponse(auto* res, lua_State* L, int responseIndex)
         const char* bodyData = lua_tolstring(L, responseIndex, &bodyLength);
         res->writeStatus("200 OK");
         res->writeHeader("Content-Type", "text/html");
-        res->end(std::string_view(bodyData, bodyLength));
+        res->end(std::string_view(bodyData, bodyLength), closeConnection);
         return;
     }
 
     if (!lua_istable(L, responseIndex))
     {
         res->writeStatus("500 Internal Server Error");
-        res->end("Handler must return a string or a response table");
+        res->end("Handler must return a string or a response table", closeConnection);
         return;
     }
 
@@ -254,7 +427,7 @@ static void handleResponse(auto* res, lua_State* L, int responseIndex)
             body = std::string_view(bodyData, bodyLength);
     }
 
-    res->end(body);
+    res->end(body, closeConnection);
     lua_pop(L, 1);
 }
 
@@ -262,8 +435,9 @@ template<typename ResT>
 struct HttpYieldContext
 {
     ResT* res = nullptr;
-    std::atomic<bool> aborted{false};
     std::shared_ptr<Ref> threadRef;
+    std::shared_ptr<RequestBodyState> bodyState;
+    std::shared_ptr<HttpResponseState> responseState;
 };
 
 template<typename ResT>
@@ -277,7 +451,8 @@ static void finishHttpYield(lua_State* L, int status, const std::shared_ptr<Http
 
     ResT* res = ctx->res;
 
-    if (!res || ctx->aborted.load())
+    if (!res || (ctx->responseState && ctx->responseState->aborted.load()) ||
+        (ctx->bodyState && ctx->bodyState->status == RequestBodyStatus::Aborted))
     {
         lua_settop(L, 0);
         return;
@@ -285,13 +460,19 @@ static void finishHttpYield(lua_State* L, int status, const std::shared_ptr<Http
 
     if (status == LUA_OK)
     {
-        handleResponse(res, L, -1);
+        bool closeConnection = shouldCloseForUnreadBody(ctx->bodyState);
+        if (closeConnection && ctx->bodyState && ctx->bodyState->clearBodyCallback)
+            ctx->bodyState->clearBodyCallback();
+        handleResponse(res, L, -1, closeConnection);
     }
     else
     {
         std::string error = lua_isstring(L, -1) ? lua_tostring(L, -1) : "Server error";
         res->writeStatus("500 Internal Server Error");
-        res->end("Server error: " + error);
+        bool closeConnection = shouldCloseForUnreadBody(ctx->bodyState);
+        if (closeConnection && ctx->bodyState && ctx->bodyState->clearBodyCallback)
+            ctx->bodyState->clearBodyCallback();
+        res->end("Server error: " + error, closeConnection);
     }
 
     ctx->res = nullptr;
@@ -489,7 +670,7 @@ static void pushRequestTable(
     lua_State* L,
     const RequestHeaders& headers,
     const RequestRouteData& route,
-    std::string_view body,
+    const std::shared_ptr<RequestBodyState>& bodyState,
     lua_CFunction upgradeFn,
     int nUpvalues,
     PushUpvalues pushUpvalues
@@ -513,12 +694,22 @@ static void pushRequestTable(
     pushHeadersTable(headers, L);
     lua_settable(L, -3);
 
-    lua_pushstring(L, "body");
-    lua_pushlstring(L, body.data() != nullptr ? body.data() : "", body.size());
+    int requestIndex = lua_absindex(L, -1);
+    lua_createtable(L, 0, 2);
+
+    lua_pushstring(L, "__index");
+    auto* storage = new (lua_newuserdatadtor(
+        L,
+        sizeof(std::shared_ptr<RequestBodyState>),
+        [](void* ptr)
+        {
+            std::destroy_at(static_cast<std::shared_ptr<RequestBodyState>*>(ptr));
+        }
+    )) std::shared_ptr<RequestBodyState>(bodyState);
+    (void)storage;
+    lua_pushcclosure(L, request_index, "request.__index", 1);
     lua_settable(L, -3);
 
-    int requestIndex = lua_absindex(L, -1);
-    lua_createtable(L, 0, 1);
     lua_pushlightuserdata(L, &kRequestUpgradeKey);
     pushUpvalues(L);
     lua_pushcclosure(L, upgradeFn, "request.upgrade", nUpvalues);
@@ -543,7 +734,7 @@ static HandlerThread prepareHttpHandlerThread(
     const std::shared_ptr<ServerLoopState>& state,
     const RequestHeaders& headers,
     const RequestRouteData& route,
-    std::string_view body
+    const std::shared_ptr<RequestBodyState>& bodyState
 )
 {
     LUTE_ASSERT(state);
@@ -555,7 +746,7 @@ static HandlerThread prepareHttpHandlerThread(
 
     // `lua_resume(L, nullptr, 2)` expects the stack shape `[handler, request, server]`.
     state->handlerRef->push(L);
-    pushRequestTable(L, headers, route, body, server_upgrade_noop, 0, [](lua_State*) {});
+    pushRequestTable(L, headers, route, bodyState, server_upgrade_noop, 0, [](lua_State*) {});
     pushServerTable(L, state->serverRef);
     return thread;
 }
@@ -585,10 +776,13 @@ static HandlerThread prepareUpgradeHandlerThread(
 
     HandlerThread thread = createHandlerThread(state->runtime);
     lua_State* L = thread.L;
+    auto bodyState = std::make_shared<RequestBodyState>();
+    bodyState->runtime = state->runtime;
+    bodyState->status = RequestBodyStatus::Complete;
 
     // `lua_resume(L, nullptr, 2)` expects the stack shape `[handler, request, server]`.
     state->handlerRef->push(L);
-    pushRequestTable(L, headers, route, std::string_view(""), server_upgrade_do<SSL>, 4, pushUpgradeUpvalues);
+    pushRequestTable(L, headers, route, bodyState, server_upgrade_do<SSL>, 4, pushUpgradeUpvalues);
     pushServerTable(L, state->serverRef);
     return thread;
 }
@@ -599,17 +793,24 @@ static void processRequest(
     ResT* res,
     const RequestHeaders& headers,
     const RequestRouteData& route,
-    std::string_view body
+    const std::shared_ptr<RequestBodyState>& bodyState,
+    const std::shared_ptr<HttpResponseState>& responseState
 )
 {
+    if (responseState && responseState->aborted.load())
+        return;
+
     if (!state->handlerRef)
     {
         res->writeStatus("404 Not Found");
-        res->end("No handler configured");
+        bool closeConnection = shouldCloseForUnreadBody(bodyState);
+        if (closeConnection && bodyState && bodyState->clearBodyCallback)
+            bodyState->clearBodyCallback();
+        res->end("No handler configured", closeConnection);
         return;
     }
 
-    HandlerThread thread = prepareHttpHandlerThread(state, headers, route, body);
+    HandlerThread thread = prepareHttpHandlerThread(state, headers, route, bodyState);
     lua_State* L = thread.L;
     int status = lua_resume(L, nullptr, 2);
     if (status == LUA_YIELD)
@@ -617,14 +818,8 @@ static void processRequest(
         auto ctx = std::make_shared<HttpYieldContext<ResT>>();
         ctx->res = res;
         ctx->threadRef = std::move(thread.threadRef);
-
-        res->onAborted(
-            [ctx]()
-            {
-                ctx->aborted.store(true);
-                ctx->res = nullptr;
-            }
-        );
+        ctx->bodyState = bodyState;
+        ctx->responseState = responseState;
 
         ThreadCompletionHandler completion;
         completion.onFinish = [ctx](lua_State* L, int completionStatus)
@@ -639,15 +834,27 @@ static void processRequest(
 
     if (status != LUA_OK)
     {
+        if (responseState && responseState->aborted.load())
+            return;
+
         std::string error = lua_isstring(L, -1) ? lua_tostring(L, -1) : "Server error";
         lua_pop(L, 1);
 
         res->writeStatus("500 Internal Server Error");
-        res->end("Server error: " + error);
+        bool closeConnection = shouldCloseForUnreadBody(bodyState);
+        if (closeConnection && bodyState && bodyState->clearBodyCallback)
+            bodyState->clearBodyCallback();
+        res->end("Server error: " + error, closeConnection);
         return;
     }
 
-    handleResponse(res, L, -1);
+    if (responseState && responseState->aborted.load())
+        return;
+
+    bool closeConnection = shouldCloseForUnreadBody(bodyState);
+    if (closeConnection && bodyState && bodyState->clearBodyCallback)
+        bodyState->clearBodyCallback();
+    handleResponse(res, L, -1, closeConnection);
     lua_pop(L, 1);
 }
 
@@ -803,43 +1010,48 @@ static void installHttpRoutes(AppT* app, const std::shared_ptr<ServerLoopState>&
         {
             RequestRouteData route = extractRequestRouteData(req);
             RequestHeaders headers = extractRequestHeaders(req);
+            auto bodyState = std::make_shared<RequestBodyState>();
+            auto responseState = std::make_shared<HttpResponseState>();
+            bodyState->runtime = state->runtime;
+            bodyState->unreadBodyMayRemain = requestBodyMayRemain(headers);
+            if (!bodyState->unreadBodyMayRemain)
+                bodyState->status = RequestBodyStatus::Complete;
+
+            bodyState->resumeReads = [res]()
+            {
+                res->resume();
+            };
+
+            bodyState->clearBodyCallback = [res]()
+            {
+                res->onData(nullptr);
+            };
+
+            if (bodyState->unreadBodyMayRemain)
+                res->pause();
 
             res->onAborted(
-                []()
+                [bodyState, responseState]()
                 {
-                    // TODO: handle aborted requests
+                    responseState->aborted.store(true);
+                    failRequestBody(bodyState, "request body aborted", RequestBodyStatus::Aborted);
                 }
             );
 
-            std::unique_ptr<std::string> bodyBuffer;
-            res->onData(
-                [state, res, route = std::move(route), headers = std::move(headers), bodyBuffer = std::move(bodyBuffer)](
-                    std::string_view data, bool last
-                ) mutable
+            if (bodyState->unreadBodyMayRemain)
+            {
+                res->onData(
+                    [bodyState](std::string_view data, bool last) mutable
+                    {
+                        receiveRequestBodyChunk(bodyState, data, last);
+                    }
+                );
+            }
+
+            state->runtime->schedule(
+                [state, res, headers = std::move(headers), route = std::move(route), bodyState, responseState]() mutable
                 {
-                    if (last)
-                    {
-                        if (bodyBuffer.get())
-                        {
-                            bodyBuffer->append(data);
-                            processRequest(state, res, headers, route, *bodyBuffer);
-                        }
-                        else
-                        {
-                            processRequest(state, res, headers, route, data);
-                        }
-                    }
-                    else
-                    {
-                        if (bodyBuffer.get())
-                        {
-                            bodyBuffer->append(data);
-                        }
-                        else
-                        {
-                            bodyBuffer = std::make_unique<std::string>(data);
-                        }
-                    }
+                    processRequest(state, res, headers, route, bodyState, responseState);
                 }
             );
         }
