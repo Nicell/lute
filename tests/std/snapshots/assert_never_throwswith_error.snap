@@ -5,13 +5,12 @@ TEST RESULTS
 
 Failed Tests (1):
 
-❌ neq_failure_suite.neq_error
-	<ROOT>/tests/std/snapshots/assertneq_error_message_in_suite.snap.luau:6
-		never_eq: expected 1 to not equal 1
+❌ never_throwswith_failure_suite.never_throwswith_error
+	<ROOT>/tests/std/snapshots/assert_never_throwswith_error.snap.luau:6
+		never_throwsWith: Expected function to not throw error with suffix "expected message", but it did
 
 --------------------------------------------------
 Total:  1
 Passed: 0 ✓
 Failed: 1 ✗
 ==================================================
-
