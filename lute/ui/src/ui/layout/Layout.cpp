@@ -1,7 +1,9 @@
 #include "lute/ui/Layout.h"
+#include "lute/ui/Profile.h"
 #include "lute/ui/Text.h"
 
 #include <algorithm>
+#include <memory>
 #include <sstream>
 
 namespace lute::ui
@@ -27,10 +29,26 @@ static Constraints childConstraints(Constraints constraints, EdgeInsets padding)
     };
 }
 
-static MeasureResult textMeasure(const std::string& text)
+static MeasureResult measureGlyphRun(const GlyphRun& run)
 {
+    return {{run.advance, run.metrics.lineHeight}, run.metrics.baseline, run.metrics.baseline};
+}
+
+static std::shared_ptr<const GlyphRun> shapeText(UiNode& node)
+{
+    if (node.shapedText && node.shapedText->text == node.text && node.shapedText->fontSize == kDefaultUiFontSize)
+        return node.shapedText;
+
+    UiProfiler::addTextRunMeasured();
+    ProfileZone zone(ProfilePhase::Text);
     TextShaper shaper;
-    return shaper.measureSingleLine(text);
+    node.shapedText = std::make_shared<GlyphRun>(shaper.shapeSingleRun(node.text));
+    return node.shapedText;
+}
+
+static MeasureResult textMeasure(UiNode& node)
+{
+    return measureGlyphRun(*shapeText(node));
 }
 
 void LayoutEngine::layout(NodeTree& tree, NodeId root, Vec2 viewport)
@@ -70,6 +88,7 @@ void LayoutEngine::place(NodeTree& tree, NodeId id, Rect rect)
 MeasureResult LayoutEngine::measureNode(NodeTree& tree, UiNode& node, Constraints constraints)
 {
     MeasureResult result{{0.0f, 0.0f}, std::nullopt, std::nullopt};
+    UiProfiler::addLayoutNodeMeasured();
 
     switch (node.kind)
     {
@@ -125,7 +144,7 @@ MeasureResult LayoutEngine::measureNode(NodeTree& tree, UiNode& node, Constraint
     }
     case WidgetKind::Text:
     {
-        MeasureResult measured = textMeasure(node.text);
+        MeasureResult measured = textMeasure(node);
         result.size = clampSize(measured.size, constraints);
         result.firstBaseline = measured.firstBaseline;
         result.lastBaseline = measured.lastBaseline;
@@ -135,7 +154,7 @@ MeasureResult LayoutEngine::measureNode(NodeTree& tree, UiNode& node, Constraint
     {
         EdgeInsets padding =
             node.padding.horizontal() == 0.0f && node.padding.vertical() == 0.0f ? EdgeInsets{6.0f, 12.0f, 6.0f, 12.0f} : node.padding;
-        MeasureResult label = textMeasure(node.text);
+        MeasureResult label = textMeasure(node);
         result.size = clampSize({std::max(64.0f, label.size.x + padding.horizontal()), std::max(32.0f, label.size.y + padding.vertical())}, constraints);
         result.firstBaseline = padding.top + label.firstBaseline.value_or(15.0f);
         result.lastBaseline = result.firstBaseline;
@@ -160,6 +179,7 @@ void LayoutEngine::placeNode(NodeTree& tree, UiNode& node, Rect rect, bool force
         return;
 
     node.layout.frame = rect;
+    UiProfiler::addLayoutNodePlaced();
     bool forceChildren = force || frameChanged;
 
     switch (node.kind)

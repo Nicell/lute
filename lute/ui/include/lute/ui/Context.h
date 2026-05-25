@@ -4,6 +4,7 @@
 #include "lute/ui/Input.h"
 #include "lute/ui/Layout.h"
 #include "lute/ui/Render.h"
+#include "lute/ui/Profile.h"
 #include "lute/ui/Scene.h"
 #include "lute/ui/Signal.h"
 
@@ -33,6 +34,8 @@ public:
     RenderStats render();
     RenderStats renderToMetalLayer(void* metalLayer, uint32_t pixelWidth, uint32_t pixelHeight, float scale);
     void retainEffect(std::shared_ptr<Effect> effect);
+    std::string dumpProfile(size_t maxFrames = 8) const;
+    const ProfileStore& profiles() const;
 
     bool activate(NodeId id);
     bool focus(NodeId id);
@@ -54,6 +57,7 @@ public:
 
 private:
     NodeId resolveRoot(NodeId requested) const;
+    ProfileFrameId nextFrameId();
     bool setFocusedNode(NodeId id, bool focusVisible);
     bool focusNext(NodeId root, bool reverse);
     void clearInvalidFocus(NodeId root);
@@ -65,9 +69,11 @@ private:
     SemanticsBuilder semanticsBuilder;
     InputRouter inputRouter;
     DawnRenderer renderer;
+    ProfileStore profileStore;
 
     Scene scene;
     SemanticTree semantics;
+    ProfileFrameId nextProfileFrameId = 1;
     NodeId rootNode = kInvalidNodeId;
     NodeId focusedNodeId = kInvalidNodeId;
     Vec2 viewportSize = {800.0f, 600.0f};

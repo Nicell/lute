@@ -3,6 +3,7 @@
 #include "lute/ui/Core.h"
 #include "lute/ui/Node.h"
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -37,6 +38,7 @@ struct DisplayItem
     float radius = 0.0f;
     Brush fill;
     std::string text;
+    std::shared_ptr<const GlyphRun> glyphRun;
     Vec2 origin;
     std::optional<Color> backgroundHint;
 };

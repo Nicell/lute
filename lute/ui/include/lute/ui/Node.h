@@ -3,12 +3,15 @@
 #include "lute/ui/Core.h"
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace lute::ui
 {
+
+struct GlyphRun;
 
 struct UiNode
 {
@@ -22,6 +25,7 @@ struct UiNode
 
     std::string title;
     std::string text;
+    std::shared_ptr<const GlyphRun> shapedText;
     float gap = 0.0f;
     EdgeInsets padding;
     bool focusable = false;

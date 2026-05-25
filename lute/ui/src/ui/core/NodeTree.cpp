@@ -1,4 +1,6 @@
 #include "lute/ui/Node.h"
+#include "lute/ui/Profile.h"
+#include "lute/ui/Text.h"
 
 #include <algorithm>
 #include <sstream>
@@ -133,6 +135,8 @@ void NodeTree::markDirty(NodeId id, DirtyBits bits)
     if (!node)
         return;
 
+    UiProfiler::addDirtyMark();
+
     DirtyBits expanded = bits;
     if (lute::ui::hasDirty(bits, DirtyBits::Text))
         expanded |= DirtyBits::Layout | DirtyBits::Paint | DirtyBits::Scene | DirtyBits::Semantics | DirtyBits::HitTest;
@@ -203,6 +207,7 @@ void NodeTree::setText(NodeId id, std::string text)
         return;
 
     node->text = std::move(text);
+    node->shapedText.reset();
     markDirty(id, DirtyBits::Text | DirtyBits::Layout | DirtyBits::Paint | DirtyBits::Scene | DirtyBits::Semantics | DirtyBits::HitTest);
 }
 

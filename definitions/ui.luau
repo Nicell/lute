@@ -119,6 +119,10 @@ function ui.dump_semantics(root: Element?): string
 	error("not implemented")
 end
 
+function ui.dump_profile(root: Element?): string
+	error("not implemented")
+end
+
 function ui.render(root: Element?): { backend: string, displayItemCount: number, sceneGeneration: number }
 	error("not implemented")
 end

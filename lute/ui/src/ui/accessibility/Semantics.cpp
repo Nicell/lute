@@ -1,4 +1,5 @@
 #include "lute/ui/Accessibility.h"
+#include "lute/ui/Profile.h"
 
 #include <sstream>
 
@@ -195,6 +196,8 @@ bool SemanticsBuilder::updateNode(NodeTree& tree, NodeId id, std::optional<Seman
 
     if (shouldEmit)
     {
+        UiProfiler::addSemanticNodeUpdated();
+
         SemanticTree::CachedNode next;
         next.node = makeNode(*node, parent);
         next.children = node->children;

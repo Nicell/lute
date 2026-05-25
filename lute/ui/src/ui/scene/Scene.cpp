@@ -1,4 +1,6 @@
 #include "lute/ui/Scene.h"
+#include "lute/ui/Profile.h"
+#include "lute/ui/Text.h"
 
 #include <cmath>
 #include <sstream>
@@ -63,7 +65,15 @@ Rect inflate(Rect rect, float amount)
     return rect;
 }
 
-DisplayItem makeTextRun(NodeId node, Rect rect, Color color, std::string text, Vec2 origin, std::optional<Color> backgroundHint)
+DisplayItem makeTextRun(
+    NodeId node,
+    Rect rect,
+    Color color,
+    std::string text,
+    std::shared_ptr<const GlyphRun> glyphRun,
+    Vec2 origin,
+    std::optional<Color> backgroundHint
+)
 {
     DisplayItem item;
     item.kind = DisplayItemKind::TextRun;
@@ -71,6 +81,7 @@ DisplayItem makeTextRun(NodeId node, Rect rect, Color color, std::string text, V
     item.rect = rect;
     item.fill = {color};
     item.text = std::move(text);
+    item.glyphRun = std::move(glyphRun);
     item.origin = origin;
     item.backgroundHint = backgroundHint;
     return item;
@@ -220,6 +231,7 @@ SceneBuilder::LocalEmission SceneBuilder::emitLocal(const UiNode& node, std::opt
             node.layout.frame,
             kDefaultTextColor,
             node.text,
+            node.shapedText,
             {node.layout.frame.x, node.layout.frame.y + node.layout.firstBaseline.value_or(15.0f)},
             backgroundHint
         ));
@@ -237,6 +249,7 @@ SceneBuilder::LocalEmission SceneBuilder::emitLocal(const UiNode& node, std::opt
             node.layout.frame,
             kButtonTextColor,
             node.text,
+            node.shapedText,
             {node.layout.frame.x + padding.left, node.layout.frame.y + node.layout.firstBaseline.value_or(21.0f)},
             buttonBackgroundHint
         ));
@@ -284,6 +297,7 @@ bool SceneBuilder::updateNode(NodeTree& tree, NodeId id, std::optional<Color> ba
         LocalEmission emission = emitLocal(*node, backgroundHint);
         childBackgroundHint = emission.childBackgroundHint;
         childBackgroundChanged = missing || previous.childBackgroundHint != childBackgroundHint;
+        UiProfiler::addSceneNodeUpdated(static_cast<uint32_t>(emission.localItems.size()));
 
         Scene::CachedNode next;
         next.localItems = std::move(emission.localItems);

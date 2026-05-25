@@ -403,6 +403,79 @@ TEST_CASE("ui_scene_and_semantics_are_retained_outputs")
     CHECK(stats.displayItemCount == 4);
 }
 
+TEST_CASE("ui_text_measurement_reuses_shaped_runs_for_scene_and_render")
+{
+    UiContext context;
+    NodeId window = context.createNode(WidgetKind::Window);
+    NodeId column = context.createNode(WidgetKind::Column);
+    NodeId text = context.createNode(WidgetKind::Text);
+
+    context.setRoot(window);
+    context.nodes().appendChild(window, column);
+    context.nodes().appendChild(column, text);
+    context.nodes().setText(text, "Count: 0");
+
+    context.flush();
+    const UiNode* textNode = context.nodes().get(text);
+    REQUIRE(textNode);
+    REQUIRE(textNode->shapedText);
+
+    const std::vector<DisplayItem>& items = context.currentScene().items();
+    auto textItem = std::find_if(
+        items.begin(),
+        items.end(),
+        [text](const DisplayItem& item)
+        {
+            return item.kind == DisplayItemKind::TextRun && item.node == text;
+        }
+    );
+    REQUIRE(textItem != items.end());
+    CHECK(textItem->glyphRun.get() == textNode->shapedText.get());
+
+    context.render();
+    std::optional<FrameProfile> latest = context.profiles().latest();
+    REQUIRE(latest);
+    CHECK(latest->counters.textRunsMeasured == 0);
+}
+
+TEST_CASE("ui_profile_records_frame_timings_and_counters")
+{
+    UiContext context;
+    NodeId window = context.createNode(WidgetKind::Window);
+    NodeId column = context.createNode(WidgetKind::Column);
+    NodeId text = context.createNode(WidgetKind::Text);
+    NodeId button = context.createNode(WidgetKind::Button);
+
+    context.setRoot(window);
+    context.nodes().appendChild(window, column);
+    context.nodes().appendChild(column, text);
+    context.nodes().appendChild(column, button);
+    context.nodes().setGap(column, 12.0f);
+    context.nodes().setPadding(column, EdgeInsets::all(24.0f));
+    context.nodes().setText(text, "Count: 0");
+    context.nodes().setText(button, "Increment");
+    context.nodes().setOnActivate(button, []() {});
+
+    RenderStats stats = context.render();
+    std::optional<FrameProfile> latest = context.profiles().latest();
+    REQUIRE(latest);
+
+    CHECK(latest->label == "render");
+    CHECK(latest->durationNs() > 0);
+    CHECK(latest->phaseDurationNs(ProfilePhase::Layout) > 0);
+    CHECK(latest->phaseDurationNs(ProfilePhase::Scene) > 0);
+    CHECK(latest->counters.layoutNodesMeasured >= 4);
+    CHECK(latest->counters.layoutNodesPlaced >= 4);
+    CHECK(latest->counters.sceneItemsEmitted >= stats.displayItemCount);
+    CHECK(latest->counters.displayItemsRendered == stats.displayItemCount);
+    CHECK(latest->counters.renderCalls == 1);
+
+    std::string dump = context.dumpProfile();
+    CHECK(dump.find("Frame") != std::string::npos);
+    CHECK(dump.find("layoutMeasured=") != std::string::npos);
+    CHECK(dump.find("displayItems=") != std::string::npos);
+}
+
 TEST_CASE_FIXTURE(CliRuntimeFixture, "ui_luau_counter_updates_signal_bound_text")
 {
     runCode(R"(
@@ -458,6 +531,40 @@ TEST_CASE_FIXTURE(CliRuntimeFixture, "ui_luau_counter_updates_signal_bound_text"
     CHECK(getReporter().getOutputs()[4] == "2");
     CHECK(getReporter().getOutputs()[5] == "Dawn");
     CHECK(getReporter().getOutputs()[6] == "4");
+}
+
+TEST_CASE_FIXTURE(CliRuntimeFixture, "ui_luau_dump_profile_reports_recent_frames")
+{
+    runCode(R"(
+        local ui = require("@lute/ui")
+
+        local root = ui.window {
+            title = "Lute UI",
+
+            ui.column {
+                gap = 12,
+                padding = 24,
+
+                ui.text("Count: 0"),
+
+                ui.button {
+                    text = "Increment",
+                    onPress = function() end,
+                },
+            },
+        }
+
+        ui.render(root)
+        local profile = ui.dump_profile(root)
+        report(profile:find("Frame") ~= nil)
+        report(profile:find("displayItems=") ~= nil)
+    )");
+
+    REQUIRE(getReporter().getErrors().empty());
+    REQUIRE(getReporter().getOutputs().size() == 2);
+
+    CHECK(getReporter().getOutputs()[0] == "true");
+    CHECK(getReporter().getOutputs()[1] == "true");
 }
 
 TEST_CASE_FIXTURE(CliRuntimeFixture, "ui_luau_keyboard_focus_activation")

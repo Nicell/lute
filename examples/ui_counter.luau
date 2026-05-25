@@ -23,3 +23,5 @@ local root = ui.window {
 }
 
 ui.run(root)
+
+print(ui.dump_profile(root))

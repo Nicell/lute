@@ -533,6 +533,18 @@ static int ui_dump_semantics(lua_State* L)
     return 1;
 }
 
+static int ui_dump_profile(lua_State* L)
+{
+    LuaUiState* state = closureState(L);
+    NodeId id = kInvalidNodeId;
+    std::shared_ptr<UiContext> context = contextFromOptionalElement(L, state, 1, &id);
+    (void)id;
+
+    std::string dump = context->dumpProfile();
+    lua_pushlstring(L, dump.data(), dump.size());
+    return 1;
+}
+
 static int ui_activate(lua_State* L)
 {
     LuaElement* element = checkElement(L, 1);
@@ -716,6 +728,7 @@ const luaL_Reg UI::lib[] = {
     {"dump_layout_tree", lute::ui::ui_dump_layout_tree},
     {"dump_scene", lute::ui::ui_dump_scene},
     {"dump_semantics", lute::ui::ui_dump_semantics},
+    {"dump_profile", lute::ui::ui_dump_profile},
     {nullptr, nullptr},
 };
 
@@ -723,7 +736,7 @@ int UI::pushLibrary(lua_State* L)
 {
     registerUiMetatables(L);
 
-    lua_createtable(L, 0, 19);
+    lua_createtable(L, 0, 20);
     int tableIndex = lua_gettop(L);
 
     void* storage = lua_newuserdatataggedwithmetatable(L, sizeof(lute::ui::LuaUiState), kUiContextTag);

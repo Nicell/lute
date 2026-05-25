@@ -1,4 +1,5 @@
 #include "lute/ui/Render.h"
+#include "lute/ui/Profile.h"
 #include "lute/ui/Text.h"
 
 #if LUTE_UI_USE_DAWN
@@ -452,8 +453,11 @@ public:
 
     bool renderScene(const Scene& scene)
     {
-        if (!ensureDevice(false, nullptr))
-            return false;
+        {
+            ProfileZone zone(ProfilePhase::PipelineSetup);
+            if (!ensureDevice(false, nullptr))
+                return false;
+        }
 
         constexpr uint32_t width = 800;
         constexpr uint32_t height = 600;
@@ -475,17 +479,29 @@ public:
         if (!metalLayer || pixelWidth == 0 || pixelHeight == 0 || scale <= 0.0f)
             return false;
 
-        if (!ensureInstance() || !ensureSurfaceObject(metalLayer) || !ensureDevice(true, &surface) || !configureSurface(pixelWidth, pixelHeight))
-            return false;
+        {
+            ProfileZone zone(ProfilePhase::PipelineSetup);
+            if (!ensureInstance() || !ensureSurfaceObject(metalLayer) || !ensureDevice(true, &surface) || !configureSurface(pixelWidth, pixelHeight))
+                return false;
+        }
 
         wgpu::SurfaceTexture surfaceTexture;
-        surface.GetCurrentTexture(&surfaceTexture);
+        {
+            ProfileZone zone(ProfilePhase::SurfaceAcquire);
+            surface.GetCurrentTexture(&surfaceTexture);
+        }
         if (!isGoodSurfaceTexture(surfaceTexture.status))
         {
             surfaceConfigured = false;
-            if (!configureSurface(pixelWidth, pixelHeight))
-                return false;
-            surface.GetCurrentTexture(&surfaceTexture);
+            {
+                ProfileZone zone(ProfilePhase::PipelineSetup);
+                if (!configureSurface(pixelWidth, pixelHeight))
+                    return false;
+            }
+            {
+                ProfileZone zone(ProfilePhase::SurfaceAcquire);
+                surface.GetCurrentTexture(&surfaceTexture);
+            }
         }
 
         if (!isGoodSurfaceTexture(surfaceTexture.status) || !surfaceTexture.texture)
@@ -494,7 +510,10 @@ public:
         if (!renderIntoView(surfaceTexture.texture.CreateView(), surfaceFormat, scene, pixelWidth, pixelHeight, scale, true))
             return false;
 
-        return surface.Present();
+        {
+            ProfileZone zone(ProfilePhase::Present);
+            return surface.Present();
+        }
     }
 
 private:
@@ -651,7 +670,8 @@ private:
         }
         surfaceConfigured = false;
         pipelineFormat = wgpu::TextureFormat::Undefined;
-        atlasDirty = atlasCursor > 0;
+        atlasDirtyStart = atlasCursor > 0 ? 0 : kAtlasCapacity;
+        atlasDirtyEnd = atlasCursor;
         ready = false;
         metalDevice = false;
     }
@@ -705,26 +725,43 @@ private:
 
     bool renderIntoView(const wgpu::TextureView& view, wgpu::TextureFormat format, const Scene& scene, uint32_t width, uint32_t height, float scale, bool presented)
     {
-        if (!view || !ensurePipelines(format))
+        if (!view)
             return false;
+
+        {
+            ProfileZone zone(ProfilePhase::PipelineSetup);
+            if (!ensurePipelines(format))
+                return false;
+        }
 
         std::vector<SolidVertex> solidVertices;
         std::vector<GlyphVertex> drawGlyphVertices;
         std::vector<GlyphVertex> paintGlyphVertices;
         std::vector<ImageGlyphVertex> imageGlyphVertices;
-        buildSceneVertices(scene, solidVertices, drawGlyphVertices, paintGlyphVertices, imageGlyphVertices, scale);
+        {
+            ProfileZone zone(ProfilePhase::RenderPrepare);
+            buildSceneVertices(scene, solidVertices, drawGlyphVertices, paintGlyphVertices, imageGlyphVertices, scale);
+        }
 
         SurfaceUniforms surfaceUniforms;
         surfaceUniforms.viewport[0] = static_cast<float>(width);
         surfaceUniforms.viewport[1] = static_cast<float>(height);
-        queue.WriteBuffer(surfaceUniformBuffer, 0, &surfaceUniforms, sizeof(surfaceUniforms));
+        {
+            ProfileZone zone(ProfilePhase::Upload);
+            UiProfiler::addBufferUpload(sizeof(surfaceUniforms));
+            queue.WriteBuffer(surfaceUniformBuffer, 0, &surfaceUniforms, sizeof(surfaceUniforms));
+        }
 
 #if LUTE_UI_USE_HARFBUZZ_GPU
         TextUniforms textUniforms;
         setPixelMvp(textUniforms, width, height);
         textUniforms.viewport[0] = static_cast<float>(width);
         textUniforms.viewport[1] = static_cast<float>(height);
-        queue.WriteBuffer(textUniformBuffer, 0, &textUniforms, sizeof(textUniforms));
+        {
+            ProfileZone zone(ProfilePhase::Upload);
+            UiProfiler::addBufferUpload(sizeof(textUniforms));
+            queue.WriteBuffer(textUniformBuffer, 0, &textUniforms, sizeof(textUniforms));
+        }
 #endif
 
         writeVertexData(solidVertexBuffer, solidVertexCapacity, solidVertices);
@@ -732,60 +769,78 @@ private:
         writeVertexData(paintGlyphVertexBuffer, paintGlyphVertexCapacity, paintGlyphVertices);
         writeVertexData(imageGlyphVertexBuffer, imageGlyphVertexCapacity, imageGlyphVertices);
 
-        if (atlasDirty && atlasCursor > 0)
+#if LUTE_UI_USE_HARFBUZZ_GPU
+        if (atlasDirtyEnd > atlasDirtyStart)
         {
-            queue.WriteBuffer(atlasBuffer, 0, atlasShadow.data(), atlasCursor * 4 * sizeof(int32_t));
-            atlasDirty = false;
+            uint64_t dirtyTexels = atlasDirtyEnd - atlasDirtyStart;
+            uint64_t dirtyBytes = dirtyTexels * 4 * sizeof(int32_t);
+            uint64_t dirtyOffset = atlasDirtyStart * 4 * sizeof(int32_t);
+            ProfileZone zone(ProfilePhase::Upload);
+            UiProfiler::addBufferUpload(dirtyBytes);
+            queue.WriteBuffer(atlasBuffer, dirtyOffset, atlasShadow.data() + atlasDirtyStart * 4, dirtyBytes);
+            clearAtlasDirtyRange();
         }
+#endif
 
-        wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
-        wgpu::RenderPassColorAttachment colorAttachment;
-        colorAttachment.view = view;
-        colorAttachment.loadOp = wgpu::LoadOp::Clear;
-        colorAttachment.storeOp = wgpu::StoreOp::Store;
-        colorAttachment.clearValue = colorToLinearDawnColor({245, 245, 242, 255});
-
-        wgpu::RenderPassDescriptor renderPassDescriptor;
-        renderPassDescriptor.colorAttachmentCount = 1;
-        renderPassDescriptor.colorAttachments = &colorAttachment;
-
-        wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&renderPassDescriptor);
-        if (!solidVertices.empty())
+        wgpu::CommandBuffer commands;
         {
-            pass.SetPipeline(solidPipeline);
-            pass.SetBindGroup(0, surfaceBindGroup);
-            pass.SetVertexBuffer(0, solidVertexBuffer, 0, solidVertices.size() * sizeof(SolidVertex));
-            pass.Draw(static_cast<uint32_t>(solidVertices.size()));
-        }
+            ProfileZone encodeZone(ProfilePhase::RenderEncode);
+            wgpu::CommandEncoder encoder = device.CreateCommandEncoder();
+            wgpu::RenderPassColorAttachment colorAttachment;
+            colorAttachment.view = view;
+            colorAttachment.loadOp = wgpu::LoadOp::Clear;
+            colorAttachment.storeOp = wgpu::StoreOp::Store;
+            colorAttachment.clearValue = colorToLinearDawnColor({245, 245, 242, 255});
 
-        if (!drawGlyphVertices.empty())
+            wgpu::RenderPassDescriptor renderPassDescriptor;
+            renderPassDescriptor.colorAttachmentCount = 1;
+            renderPassDescriptor.colorAttachments = &colorAttachment;
+
+            wgpu::RenderPassEncoder pass = encoder.BeginRenderPass(&renderPassDescriptor);
+            if (!solidVertices.empty())
+            {
+                UiProfiler::addDrawCall();
+                pass.SetPipeline(solidPipeline);
+                pass.SetBindGroup(0, surfaceBindGroup);
+                pass.SetVertexBuffer(0, solidVertexBuffer, 0, solidVertices.size() * sizeof(SolidVertex));
+                pass.Draw(static_cast<uint32_t>(solidVertices.size()));
+            }
+
+            if (!drawGlyphVertices.empty())
+            {
+                UiProfiler::addDrawCall();
+                pass.SetPipeline(textPipeline);
+                pass.SetBindGroup(0, textBindGroup);
+                pass.SetVertexBuffer(0, glyphVertexBuffer, 0, drawGlyphVertices.size() * sizeof(GlyphVertex));
+                pass.Draw(static_cast<uint32_t>(drawGlyphVertices.size()));
+            }
+
+            if (!paintGlyphVertices.empty())
+            {
+                UiProfiler::addDrawCall();
+                pass.SetPipeline(paintTextPipeline);
+                pass.SetBindGroup(0, textBindGroup);
+                pass.SetVertexBuffer(0, paintGlyphVertexBuffer, 0, paintGlyphVertices.size() * sizeof(GlyphVertex));
+                pass.Draw(static_cast<uint32_t>(paintGlyphVertices.size()));
+            }
+
+            if (!imageGlyphVertices.empty())
+            {
+                UiProfiler::addDrawCall();
+                pass.SetPipeline(imageGlyphPipeline);
+                pass.SetBindGroup(0, surfaceBindGroup);
+                pass.SetBindGroup(1, imageGlyphBindGroup);
+                pass.SetVertexBuffer(0, imageGlyphVertexBuffer, 0, imageGlyphVertices.size() * sizeof(ImageGlyphVertex));
+                pass.Draw(static_cast<uint32_t>(imageGlyphVertices.size()));
+            }
+            pass.End();
+
+            commands = encoder.Finish();
+        }
         {
-            pass.SetPipeline(textPipeline);
-            pass.SetBindGroup(0, textBindGroup);
-            pass.SetVertexBuffer(0, glyphVertexBuffer, 0, drawGlyphVertices.size() * sizeof(GlyphVertex));
-            pass.Draw(static_cast<uint32_t>(drawGlyphVertices.size()));
+            ProfileZone submitZone(ProfilePhase::Submit);
+            queue.Submit(1, &commands);
         }
-
-        if (!paintGlyphVertices.empty())
-        {
-            pass.SetPipeline(paintTextPipeline);
-            pass.SetBindGroup(0, textBindGroup);
-            pass.SetVertexBuffer(0, paintGlyphVertexBuffer, 0, paintGlyphVertices.size() * sizeof(GlyphVertex));
-            pass.Draw(static_cast<uint32_t>(paintGlyphVertices.size()));
-        }
-
-        if (!imageGlyphVertices.empty())
-        {
-            pass.SetPipeline(imageGlyphPipeline);
-            pass.SetBindGroup(0, surfaceBindGroup);
-            pass.SetBindGroup(1, imageGlyphBindGroup);
-            pass.SetVertexBuffer(0, imageGlyphVertexBuffer, 0, imageGlyphVertices.size() * sizeof(ImageGlyphVertex));
-            pass.Draw(static_cast<uint32_t>(imageGlyphVertices.size()));
-        }
-        pass.End();
-
-        wgpu::CommandBuffer commands = encoder.Finish();
-        queue.Submit(1, &commands);
         (void)presented;
         return true;
     }
@@ -835,12 +890,21 @@ private:
         if (item.text.empty() || !ensureGlyphEncoders())
             return;
 
-        TextShaper shaper;
-        GlyphRun run = shaper.shapeSingleRun(item.text);
-        if (run.glyphs.empty())
+        GlyphRun fallbackRun;
+        const GlyphRun* run = item.glyphRun.get();
+        if (!run)
+        {
+            TextShaper shaper;
+            fallbackRun = shaper.shapeSingleRun(item.text);
+            run = &fallbackRun;
+        }
+        if (run->glyphs.empty())
             return;
 
-        float fontSize = run.fontSize * scale;
+        UiProfiler::addTextRunRendered();
+        UiProfiler::addGlyphsRendered(static_cast<uint32_t>(std::min<size_t>(run->glyphs.size(), UINT32_MAX)));
+
+        float fontSize = run->fontSize * scale;
         float penX = item.origin.x * scale;
         float penY = std::floor(item.origin.y * scale);
         auto color = colorToLinearFloat(item.fill.color);
@@ -848,7 +912,7 @@ private:
         if (item.backgroundHint)
             background = colorToLinearFloat(*item.backgroundHint);
 
-        for (const ShapedGlyph& shaped : run.glyphs)
+        for (const ShapedGlyph& shaped : run->glyphs)
         {
             const FontFace* glyphFont = shaped.fontFace ? shaped.fontFace : &defaultUiFontFace();
             uint32_t upem = glyphFont->unitsPerEm();
@@ -858,7 +922,7 @@ private:
             uint32_t imagePpem = static_cast<uint32_t>(std::max(1.0f, std::ceil(fontSize)));
             if (glyphFont->prefersPlatformGlyphMetrics())
             {
-                GlyphMetrics metrics = glyphFont->glyphMetrics(shaped.id, run.fontSize);
+                GlyphMetrics metrics = glyphFont->glyphMetrics(shaped.id, run->fontSize);
                 if (metrics.available && metrics.height != 0.0f)
                     imagePpem = static_cast<uint32_t>(std::max(1.0f, std::ceil(std::abs(metrics.height) * scale)));
             }
@@ -1050,7 +1114,11 @@ private:
         layout.rowsPerImage = image.height;
 
         wgpu::Extent3D size{image.width, image.height, 1};
-        queue.WriteTexture(&destination, image.pixels.data(), image.pixels.size(), &layout, &size);
+        {
+            ProfileZone zone(ProfilePhase::Upload);
+            queue.WriteTexture(&destination, image.pixels.data(), image.pixels.size(), &layout, &size);
+            UiProfiler::addBufferUpload(image.pixels.size());
+        }
 
         hb_glyph_extents_t extents = {};
         bool usedPlatformMetrics = false;
@@ -1128,8 +1196,23 @@ private:
             target[i] = static_cast<int32_t>(source[i]);
 
         atlasCursor += texels;
-        atlasDirty = true;
+        markAtlasDirtyRange(offset, texels);
         return true;
+    }
+
+    void markAtlasDirtyRange(uint64_t offset, uint64_t texels)
+    {
+        if (texels == 0)
+            return;
+
+        atlasDirtyStart = std::min(atlasDirtyStart, offset);
+        atlasDirtyEnd = std::max(atlasDirtyEnd, offset + texels);
+    }
+
+    void clearAtlasDirtyRange()
+    {
+        atlasDirtyStart = kAtlasCapacity;
+        atlasDirtyEnd = 0;
     }
 #endif
 
@@ -1146,7 +1229,11 @@ private:
             buffer = createBuffer(device, capacity, wgpu::BufferUsage::Vertex | wgpu::BufferUsage::CopyDst);
         }
 
-        queue.WriteBuffer(buffer, 0, vertices.data(), byteSize);
+        {
+            ProfileZone zone(ProfilePhase::Upload);
+            queue.WriteBuffer(buffer, 0, vertices.data(), byteSize);
+            UiProfiler::addBufferUpload(byteSize);
+        }
     }
 
     void setPixelMvp(TextUniforms& uniforms, uint32_t width, uint32_t height)
@@ -1330,9 +1417,12 @@ fn clip_from_pixel(position: vec2f) -> vec4f {
 
         if (!atlasBuffer)
         {
-            atlasShadow.assign(kAtlasCapacity * 4, 0);
+            if (atlasShadow.empty())
+                atlasShadow.assign(kAtlasCapacity * 4, 0);
+            else if (atlasShadow.size() != kAtlasCapacity * 4)
+                atlasShadow.resize(kAtlasCapacity * 4);
             atlasBuffer = createBuffer(device, kAtlasCapacity * 4 * sizeof(int32_t), wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst);
-            atlasDirty = true;
+            markAtlasDirtyRange(0, atlasCursor);
         }
 
         wgpu::BindGroupLayoutEntry entries[2];
@@ -1791,7 +1881,8 @@ fn clip_from_pixel(position: vec2f) -> vec4f {
 
     std::vector<int32_t> atlasShadow;
     uint64_t atlasCursor = 0;
-    bool atlasDirty = false;
+    uint64_t atlasDirtyStart = kAtlasCapacity;
+    uint64_t atlasDirtyEnd = 0;
     uint32_t imageAtlasCursorX = 0;
     uint32_t imageAtlasCursorY = 0;
     uint32_t imageAtlasRowHeight = 0;
@@ -1815,6 +1906,8 @@ DawnBackend& backend()
 
 RenderStats DawnRenderer::render(const Scene& scene)
 {
+    UiProfiler::addRenderCall();
+    UiProfiler::addDisplayItemsRendered(scene.items().size());
 #if LUTE_UI_USE_DAWN
     if (backend().renderScene(scene))
         return {"Dawn", scene.items().size(), scene.generation()};
@@ -1825,6 +1918,8 @@ RenderStats DawnRenderer::render(const Scene& scene)
 
 RenderStats DawnRenderer::renderToMetalLayer(const Scene& scene, void* metalLayer, uint32_t pixelWidth, uint32_t pixelHeight, float scale)
 {
+    UiProfiler::addRenderCall();
+    UiProfiler::addDisplayItemsRendered(scene.items().size());
 #if LUTE_UI_USE_DAWN
     if (backend().renderToMetalLayer(scene, metalLayer, pixelWidth, pixelHeight, scale))
         return {"Dawn", scene.items().size(), scene.generation()};

@@ -9,6 +9,7 @@ target_sources(Lute.UI PRIVATE
     include/lute/ui/Layout.h
     include/lute/ui/Node.h
     include/lute/ui/Platform.h
+    include/lute/ui/Profile.h
     include/lute/ui/Render.h
     include/lute/ui/Scene.h
     include/lute/ui/Signal.h
@@ -17,6 +18,7 @@ target_sources(Lute.UI PRIVATE
     src/ui/accessibility/Semantics.cpp
     src/ui/core/Dirty.cpp
     src/ui/core/NodeTree.cpp
+    src/ui/core/Profile.cpp
     src/ui/core/UiContext.cpp
     src/ui/Input.cpp
     src/ui/layout/Layout.cpp
