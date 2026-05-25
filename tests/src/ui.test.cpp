@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <vector>
 
 #include "cliruntimefixture.h"
 #include "doctest.h"
@@ -281,6 +282,167 @@ TEST_CASE("ui_focus_traversal_and_keyboard_activation")
     CHECK(*context.focusedNode() == first);
     context.flush();
     CHECK(context.currentSemantics().dump().find("focused") != std::string::npos);
+}
+
+TEST_CASE("ui_pointer_hover_pressed_and_capture_state")
+{
+    UiContext context;
+    NodeId window = context.createNode(WidgetKind::Window);
+    NodeId button = context.createNode(WidgetKind::Button);
+
+    context.setRoot(window);
+    context.nodes().appendChild(window, button);
+    context.nodes().setPadding(window, EdgeInsets::all(24.0f));
+    context.nodes().setText(button, "Increment");
+
+    int activations = 0;
+    context.nodes().setOnActivate(
+        button,
+        [&]()
+        {
+            activations++;
+        }
+    );
+    context.flush();
+
+    const UiNode* buttonNode = context.nodes().get(button);
+    REQUIRE(buttonNode);
+    lute::ui::Rect hitBounds = controlHitBounds(*buttonNode, resolveButtonMetrics(*buttonNode));
+    Vec2 center{hitBounds.x + hitBounds.width * 0.5f, hitBounds.y + hitBounds.height * 0.5f};
+    Vec2 outside{hitBounds.x + hitBounds.width + 20.0f, hitBounds.y + hitBounds.height + 20.0f};
+
+    PointerEvent pointer;
+    pointer.kind = PointerEventKind::Move;
+    pointer.position = center;
+    CHECK(context.dispatchPointer(pointer));
+    REQUIRE(context.hoveredNode());
+    CHECK(*context.hoveredNode() == button);
+    CHECK(context.nodes().get(button)->hovered);
+
+    context.flush();
+    buttonNode = context.nodes().get(button);
+    REQUIRE(buttonNode);
+    ControlMetrics hoverMetrics = resolveButtonMetrics(*buttonNode);
+    auto hoverFill = std::find_if(
+        context.currentScene().items().begin(),
+        context.currentScene().items().end(),
+        [button, buttonNode, hoverMetrics](const DisplayItem& item)
+        {
+            return item.kind == DisplayItemKind::RoundedRect && item.node == button && item.rect == controlVisualBounds(*buttonNode) &&
+                   item.fill.color == hoverMetrics.fillColor;
+        }
+    );
+    REQUIRE(hoverFill != context.currentScene().items().end());
+
+    pointer.kind = PointerEventKind::Down;
+    CHECK(context.dispatchPointer(pointer));
+    REQUIRE(context.focusedNode());
+    CHECK(*context.focusedNode() == button);
+    REQUIRE(context.capturedPointerNode());
+    CHECK(*context.capturedPointerNode() == button);
+    REQUIRE(context.pressedNode());
+    CHECK(*context.pressedNode() == button);
+
+    pointer.kind = PointerEventKind::Move;
+    pointer.position = outside;
+    CHECK(context.dispatchPointer(pointer));
+    CHECK_FALSE(context.hoveredNode());
+    CHECK_FALSE(context.pressedNode());
+    REQUIRE(context.capturedPointerNode());
+    CHECK(*context.capturedPointerNode() == button);
+
+    pointer.kind = PointerEventKind::Up;
+    CHECK(context.dispatchPointer(pointer));
+    CHECK_FALSE(context.capturedPointerNode());
+    CHECK_FALSE(context.pressedNode());
+    CHECK(activations == 0);
+
+    pointer.kind = PointerEventKind::Down;
+    pointer.position = center;
+    CHECK(context.dispatchPointer(pointer));
+    pointer.kind = PointerEventKind::Move;
+    pointer.position = outside;
+    CHECK(context.dispatchPointer(pointer));
+    pointer.position = center;
+    CHECK(context.dispatchPointer(pointer));
+    REQUIRE(context.pressedNode());
+    CHECK(*context.pressedNode() == button);
+    pointer.kind = PointerEventKind::Up;
+    CHECK(context.dispatchPointer(pointer));
+    CHECK(activations == 1);
+    CHECK_FALSE(context.capturedPointerNode());
+    CHECK_FALSE(context.pressedNode());
+}
+
+TEST_CASE("ui_text_input_and_ime_composition_route_to_focused_node")
+{
+    UiContext context;
+    NodeId window = context.createNode(WidgetKind::Window);
+    NodeId input = context.createNode(WidgetKind::Text);
+
+    context.setRoot(window);
+    context.nodes().appendChild(window, input);
+    context.nodes().setText(input, "Input");
+
+    std::string committed;
+    std::vector<ImeCompositionEvent> compositionEvents;
+    context.nodes().setOnTextInput(
+        input,
+        [&](const TextInputEvent& event)
+        {
+            committed += event.text;
+        }
+    );
+    context.nodes().setOnImeComposition(
+        input,
+        [&](const ImeCompositionEvent& event)
+        {
+            compositionEvents.push_back(event);
+        }
+    );
+
+    context.flush();
+    REQUIRE(context.focus(input));
+
+    KeyEvent space;
+    space.kind = KeyEventKind::Down;
+    space.physical = PhysicalKey::Space;
+    space.logical = LogicalKey::Space;
+    CHECK_FALSE(context.dispatchKey(space));
+
+    ImeCompositionEvent start;
+    start.kind = ImeCompositionEventKind::Start;
+    start.text = "n";
+    start.selectionStart = 0;
+    start.selectionEnd = 1;
+    CHECK(context.dispatchImeComposition(start));
+
+    ImeCompositionEvent update;
+    update.kind = ImeCompositionEventKind::Update;
+    update.text = "ni";
+    update.selectionStart = 0;
+    update.selectionEnd = 2;
+    CHECK(context.dispatchImeComposition(update));
+
+    TextInputEvent text;
+    text.text = "ni";
+    CHECK(context.dispatchTextInput(text));
+
+    ImeCompositionEvent end;
+    end.kind = ImeCompositionEventKind::End;
+    CHECK(context.dispatchImeComposition(end));
+
+    CHECK(committed == "ni");
+    REQUIRE(compositionEvents.size() == 3);
+    CHECK(compositionEvents[0].kind == ImeCompositionEventKind::Start);
+    CHECK(compositionEvents[0].text == "n");
+    CHECK(compositionEvents[1].kind == ImeCompositionEventKind::Update);
+    CHECK(compositionEvents[1].text == "ni");
+    CHECK(compositionEvents[2].kind == ImeCompositionEventKind::End);
+
+    REQUIRE(context.focus(input));
+    context.nodes().setDisabled(input, true);
+    CHECK_FALSE(context.dispatchTextInput(text));
 }
 
 TEST_CASE("ui_native_accessibility_actions_route_through_semantics")

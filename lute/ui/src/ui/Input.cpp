@@ -6,7 +6,7 @@ namespace lute::ui
 
 static bool isInteractive(const UiNode& node)
 {
-    return node.kind == WidgetKind::Button && !node.disabled;
+    return node.focusable && !node.disabled;
 }
 
 std::optional<NodeId> InputRouter::hitTest(const NodeTree& tree, NodeId root, Vec2 point) const
@@ -27,16 +27,32 @@ std::optional<NodeId> InputRouter::hitTest(const NodeTree& tree, NodeId root, Ve
     return std::nullopt;
 }
 
-bool InputRouter::dispatchPointer(NodeTree& tree, NodeId root, const PointerEvent& event) const
+bool InputRouter::dispatchPointer(NodeTree& tree, NodeId target, const PointerEvent& event, bool pointerInsideTarget) const
 {
-    if (event.kind != PointerEventKind::Up)
+    if (event.kind != PointerEventKind::Up || !pointerInsideTarget)
         return false;
 
-    std::optional<NodeId> target = hitTest(tree, root, event.position);
-    if (!target)
+    return dispatchCommand(tree, target, Command::Activate);
+}
+
+bool InputRouter::dispatchTextInput(NodeTree& tree, NodeId target, const TextInputEvent& event) const
+{
+    UiNode* node = tree.get(target);
+    if (!node || node->disabled || !node->onTextInput || event.text.empty())
         return false;
 
-    return dispatchCommand(tree, *target, Command::Activate);
+    node->onTextInput(event);
+    return true;
+}
+
+bool InputRouter::dispatchImeComposition(NodeTree& tree, NodeId target, const ImeCompositionEvent& event) const
+{
+    UiNode* node = tree.get(target);
+    if (!node || node->disabled || !node->onImeComposition)
+        return false;
+
+    node->onImeComposition(event);
+    return true;
 }
 
 bool InputRouter::dispatchCommand(NodeTree& tree, NodeId target, Command command) const

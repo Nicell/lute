@@ -25,6 +25,24 @@ NSString* nsStringFromStd(const std::string& value)
     return [[NSString alloc] initWithBytes:value.data() length:value.size() encoding:NSUTF8StringEncoding];
 }
 
+std::string utf8FromTextInputString(id value)
+{
+    NSString* string = nil;
+    if ([value isKindOfClass:[NSAttributedString class]])
+        string = [value string];
+    else if ([value isKindOfClass:[NSString class]])
+        string = value;
+
+    if (!string)
+        return {};
+
+    NSData* data = [string dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data)
+        return {};
+
+    return std::string(static_cast<const char*>([data bytes]), static_cast<size_t>([data length]));
+}
+
 std::shared_ptr<const void> retainCoreTextFont(CTFontRef font)
 {
     if (!font)
@@ -338,17 +356,24 @@ public:
 
 } // namespace
 
-@interface LuteUiView : NSView
+@interface LuteUiView : NSView <NSTextInputClient>
 {
     std::shared_ptr<lute::ui::UiContext> _context;
     CAMetalLayer* _metalLayer;
     lute::ui::NativeWindowSurface* _surface;
+    NSTrackingArea* _trackingArea;
     bool _primaryButtonDown;
+    bool _textInputHandledDuringInterpretation;
+    bool _hasMarkedText;
+    NSRange _markedRange;
+    NSRange _selectedRange;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame context:(std::shared_ptr<lute::ui::UiContext>)context;
 - (void)updateDrawableSize;
 - (void)renderFrame;
+- (void)dispatchPointerEvent:(NSEvent*)event kind:(lute::ui::PointerEventKind)kind;
+- (void)renderAfterInputIfHandled:(BOOL)handled;
 
 @end
 
@@ -362,7 +387,12 @@ public:
         _context = std::move(context);
         _metalLayer = [[CAMetalLayer layer] retain];
         _surface = new AppKitWindowSurface(self, _metalLayer);
+        _trackingArea = nil;
         _primaryButtonDown = false;
+        _textInputHandledDuringInterpretation = false;
+        _hasMarkedText = false;
+        _markedRange = NSMakeRange(NSNotFound, 0);
+        _selectedRange = NSMakeRange(0, 0);
         [_metalLayer setOpaque:YES];
         [self setWantsLayer:YES];
         [self setLayer:_metalLayer];
@@ -372,6 +402,12 @@ public:
 
 - (void)dealloc
 {
+    if (_trackingArea)
+    {
+        [self removeTrackingArea:_trackingArea];
+        [_trackingArea release];
+        _trackingArea = nil;
+    }
     delete _surface;
     _surface = nullptr;
     [_metalLayer release];
@@ -391,6 +427,28 @@ public:
 - (BOOL)acceptsFirstResponder
 {
     return YES;
+}
+
+- (BOOL)acceptsFirstMouse:(NSEvent*)event
+{
+    (void)event;
+    return YES;
+}
+
+- (void)updateTrackingAreas
+{
+    [super updateTrackingAreas];
+
+    if (_trackingArea)
+    {
+        [self removeTrackingArea:_trackingArea];
+        [_trackingArea release];
+        _trackingArea = nil;
+    }
+
+    NSTrackingAreaOptions options = NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect;
+    _trackingArea = [[NSTrackingArea alloc] initWithRect:NSZeroRect options:options owner:self userInfo:nil];
+    [self addTrackingArea:_trackingArea];
 }
 
 - (void)viewDidMoveToWindow
@@ -447,6 +505,23 @@ public:
     lute::ui::renderNativeFrame(*_context, *_surface);
 }
 
+- (void)renderAfterInputIfHandled:(BOOL)handled
+{
+    if (!handled)
+        return;
+
+    [self renderFrame];
+}
+
+- (void)dispatchPointerEvent:(NSEvent*)event kind:(lute::ui::PointerEventKind)kind
+{
+    if (!_context)
+        return;
+
+    lute::ui::PointerEvent pointerEvent = pointerEventFromNSEvent(event, self, kind);
+    [self renderAfterInputIfHandled:lute::ui::dispatchNativePointer(*_context, pointerEvent)];
+}
+
 - (void)mouseUp:(NSEvent*)event
 {
     if (!_context)
@@ -456,14 +531,7 @@ public:
         return;
     _primaryButtonDown = false;
 
-    lute::ui::PointerEvent pointerEvent = pointerEventFromNSEvent(event, self, lute::ui::PointerEventKind::Up);
-
-    if (lute::ui::dispatchNativePointer(*_context, pointerEvent))
-        [self renderFrame];
-    else if (_surface)
-        _surface->requestRedraw();
-    else
-        [self setNeedsDisplay:YES];
+    [self dispatchPointerEvent:event kind:lute::ui::PointerEventKind::Up];
 }
 
 - (void)mouseDown:(NSEvent*)event
@@ -474,13 +542,22 @@ public:
     _primaryButtonDown = true;
     [[self window] makeFirstResponder:self];
 
-    lute::ui::PointerEvent pointerEvent = pointerEventFromNSEvent(event, self, lute::ui::PointerEventKind::Down);
-    if (lute::ui::dispatchNativePointer(*_context, pointerEvent))
-        [self renderFrame];
-    else if (_surface)
-        _surface->requestRedraw();
-    else
-        [self setNeedsDisplay:YES];
+    [self dispatchPointerEvent:event kind:lute::ui::PointerEventKind::Down];
+}
+
+- (void)mouseMoved:(NSEvent*)event
+{
+    [self dispatchPointerEvent:event kind:lute::ui::PointerEventKind::Move];
+}
+
+- (void)mouseDragged:(NSEvent*)event
+{
+    [self dispatchPointerEvent:event kind:lute::ui::PointerEventKind::Move];
+}
+
+- (void)mouseExited:(NSEvent*)event
+{
+    [self dispatchPointerEvent:event kind:lute::ui::PointerEventKind::Leave];
 }
 
 - (void)keyDown:(NSEvent*)event
@@ -493,6 +570,14 @@ public:
 
     lute::ui::KeyEvent keyEvent = keyEventFromNSEvent(event, lute::ui::KeyEventKind::Down);
     if (lute::ui::dispatchNativeKey(*_context, keyEvent))
+    {
+        [self renderFrame];
+        return;
+    }
+
+    _textInputHandledDuringInterpretation = false;
+    [self interpretKeyEvents:@[ event ]];
+    if (_textInputHandledDuringInterpretation)
     {
         [self renderFrame];
         return;
@@ -517,6 +602,112 @@ public:
     }
 
     [super keyUp:event];
+}
+
+- (void)insertText:(id)string replacementRange:(NSRange)replacementRange
+{
+    (void)replacementRange;
+    if (!_context)
+        return;
+
+    if (_hasMarkedText)
+    {
+        lute::ui::ImeCompositionEvent endEvent;
+        endEvent.kind = lute::ui::ImeCompositionEventKind::End;
+        _textInputHandledDuringInterpretation =
+            lute::ui::dispatchNativeImeComposition(*_context, endEvent) || _textInputHandledDuringInterpretation;
+        _hasMarkedText = false;
+        _markedRange = NSMakeRange(NSNotFound, 0);
+    }
+
+    std::string text = utf8FromTextInputString(string);
+    if (text.empty())
+        return;
+
+    lute::ui::TextInputEvent event;
+    event.text = std::move(text);
+    _textInputHandledDuringInterpretation = lute::ui::dispatchNativeTextInput(*_context, event) || _textInputHandledDuringInterpretation;
+}
+
+- (void)setMarkedText:(id)string selectedRange:(NSRange)selectedRange replacementRange:(NSRange)replacementRange
+{
+    (void)replacementRange;
+    if (!_context)
+        return;
+
+    std::string text = utf8FromTextInputString(string);
+    lute::ui::ImeCompositionEvent event;
+    event.kind = _hasMarkedText ? lute::ui::ImeCompositionEventKind::Update : lute::ui::ImeCompositionEventKind::Start;
+    event.text = std::move(text);
+    event.selectionStart = selectedRange.location == NSNotFound ? 0 : static_cast<uint32_t>(selectedRange.location);
+    event.selectionEnd = selectedRange.location == NSNotFound ? event.selectionStart : static_cast<uint32_t>(selectedRange.location + selectedRange.length);
+
+    _hasMarkedText = !event.text.empty();
+    _markedRange = _hasMarkedText ? NSMakeRange(0, [string length]) : NSMakeRange(NSNotFound, 0);
+    _selectedRange = selectedRange;
+    _textInputHandledDuringInterpretation = lute::ui::dispatchNativeImeComposition(*_context, event) || _textInputHandledDuringInterpretation;
+}
+
+- (void)unmarkText
+{
+    if (!_context || !_hasMarkedText)
+        return;
+
+    lute::ui::ImeCompositionEvent event;
+    event.kind = lute::ui::ImeCompositionEventKind::End;
+    _hasMarkedText = false;
+    _markedRange = NSMakeRange(NSNotFound, 0);
+    _textInputHandledDuringInterpretation = lute::ui::dispatchNativeImeComposition(*_context, event) || _textInputHandledDuringInterpretation;
+}
+
+- (BOOL)hasMarkedText
+{
+    return _hasMarkedText;
+}
+
+- (NSRange)markedRange
+{
+    return _markedRange;
+}
+
+- (NSRange)selectedRange
+{
+    return _selectedRange;
+}
+
+- (NSArray<NSAttributedStringKey>*)validAttributesForMarkedText
+{
+    return @[];
+}
+
+- (NSAttributedString*)attributedSubstringForProposedRange:(NSRange)range actualRange:(NSRangePointer)actualRange
+{
+    if (actualRange)
+        *actualRange = NSMakeRange(NSNotFound, 0);
+    (void)range;
+    return nil;
+}
+
+- (NSUInteger)characterIndexForPoint:(NSPoint)point
+{
+    (void)point;
+    return 0;
+}
+
+- (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actualRange
+{
+    if (actualRange)
+        *actualRange = range;
+
+    NSRect bounds = [self bounds];
+    NSRect local = NSMakeRect(bounds.origin.x, bounds.origin.y, 1.0, std::max<CGFloat>(1.0, bounds.size.height));
+    NSRect windowRect = [self convertRect:local toView:nil];
+    return [[self window] convertRectToScreen:windowRect];
+}
+
+- (void)doCommandBySelector:(SEL)selector
+{
+    (void)selector;
 }
 
 @end

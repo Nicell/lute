@@ -4,6 +4,7 @@
 #include "lute/ui/Node.h"
 
 #include <optional>
+#include <string>
 
 namespace lute::ui
 {
@@ -13,6 +14,8 @@ enum class PointerEventKind
     Down,
     Up,
     Move,
+    Leave,
+    Cancel,
 };
 
 enum class PointerButton
@@ -61,6 +64,7 @@ struct PointerEvent
     Vec2 position;
     PointerButton button = PointerButton::Primary;
     Modifiers modifiers;
+    uint32_t pointerId = 0;
 };
 
 struct KeyEvent
@@ -70,6 +74,27 @@ struct KeyEvent
     LogicalKey logical = LogicalKey::Unknown;
     Modifiers modifiers;
     bool repeat = false;
+};
+
+struct TextInputEvent
+{
+    std::string text;
+};
+
+enum class ImeCompositionEventKind
+{
+    Start,
+    Update,
+    End,
+    Cancel,
+};
+
+struct ImeCompositionEvent
+{
+    ImeCompositionEventKind kind = ImeCompositionEventKind::Update;
+    std::string text;
+    uint32_t selectionStart = 0;
+    uint32_t selectionEnd = 0;
 };
 
 enum class Command
@@ -87,7 +112,9 @@ class InputRouter
 {
 public:
     std::optional<NodeId> hitTest(const NodeTree& tree, NodeId root, Vec2 point) const;
-    bool dispatchPointer(NodeTree& tree, NodeId root, const PointerEvent& event) const;
+    bool dispatchPointer(NodeTree& tree, NodeId target, const PointerEvent& event, bool pointerInsideTarget) const;
+    bool dispatchTextInput(NodeTree& tree, NodeId target, const TextInputEvent& event) const;
+    bool dispatchImeComposition(NodeTree& tree, NodeId target, const ImeCompositionEvent& event) const;
     bool dispatchCommand(NodeTree& tree, NodeId target, Command command) const;
 };
 

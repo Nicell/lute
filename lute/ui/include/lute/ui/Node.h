@@ -12,6 +12,8 @@ namespace lute::ui
 {
 
 struct GlyphRun;
+struct TextInputEvent;
+struct ImeCompositionEvent;
 
 struct UiNode
 {
@@ -31,11 +33,14 @@ struct UiNode
     bool focusable = false;
     bool focused = false;
     bool focusVisible = false;
+    bool hovered = false;
     bool disabled = false;
     bool pressed = false;
     void* widgetState = nullptr;
 
     std::function<void()> onActivate;
+    std::function<void(const TextInputEvent&)> onTextInput;
+    std::function<void(const ImeCompositionEvent&)> onImeComposition;
 };
 
 class NodeTree
@@ -60,7 +65,11 @@ public:
     void setPadding(NodeId id, EdgeInsets padding);
     void setDisabled(NodeId id, bool disabled);
     void setFocused(NodeId id, bool focused, bool focusVisible);
+    void setHovered(NodeId id, bool hovered);
+    void setPressed(NodeId id, bool pressed);
     void setOnActivate(NodeId id, std::function<void()> callback);
+    void setOnTextInput(NodeId id, std::function<void(const TextInputEvent&)> callback);
+    void setOnImeComposition(NodeId id, std::function<void(const ImeCompositionEvent&)> callback);
 
     std::string dump(NodeId root) const;
 

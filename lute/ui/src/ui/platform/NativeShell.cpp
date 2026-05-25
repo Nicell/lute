@@ -17,6 +17,16 @@ bool dispatchNativeKey(UiContext& context, const KeyEvent& event, NodeId root)
     return context.dispatchKey(event, root);
 }
 
+bool dispatchNativeTextInput(UiContext& context, const TextInputEvent& event, NodeId root)
+{
+    return context.dispatchTextInput(event, root);
+}
+
+bool dispatchNativeImeComposition(UiContext& context, const ImeCompositionEvent& event, NodeId root)
+{
+    return context.dispatchImeComposition(event, root);
+}
+
 bool dispatchNativeAccessibilityAction(UiContext& context, SemanticNodeId id, SemanticAction action)
 {
     context.flush();

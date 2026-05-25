@@ -41,8 +41,13 @@ public:
     bool focus(NodeId id);
     bool clearFocus();
     std::optional<NodeId> focusedNode() const;
+    std::optional<NodeId> hoveredNode() const;
+    std::optional<NodeId> pressedNode() const;
+    std::optional<NodeId> capturedPointerNode() const;
     bool dispatchPointer(const PointerEvent& event, NodeId root = kInvalidNodeId);
     bool dispatchKey(const KeyEvent& event, NodeId root = kInvalidNodeId);
+    bool dispatchTextInput(const TextInputEvent& event, NodeId root = kInvalidNodeId);
+    bool dispatchImeComposition(const ImeCompositionEvent& event, NodeId root = kInvalidNodeId);
 
     const Scene& currentScene() const;
     const SemanticTree& currentSemantics() const;
@@ -59,8 +64,11 @@ private:
     NodeId resolveRoot(NodeId requested) const;
     ProfileFrameId nextFrameId();
     bool setFocusedNode(NodeId id, bool focusVisible);
+    bool setHoveredNode(NodeId id);
+    bool setPressedNode(NodeId id);
     bool focusNext(NodeId root, bool reverse);
     void clearInvalidFocus(NodeId root);
+    void clearInvalidInteractionState(NodeId root);
 
     ReactiveGraph graph;
     NodeTree tree;
@@ -76,6 +84,9 @@ private:
     ProfileFrameId nextProfileFrameId = 1;
     NodeId rootNode = kInvalidNodeId;
     NodeId focusedNodeId = kInvalidNodeId;
+    NodeId hoveredNodeId = kInvalidNodeId;
+    NodeId pressedNodeId = kInvalidNodeId;
+    NodeId pointerCaptureNodeId = kInvalidNodeId;
     Vec2 viewportSize = {800.0f, 600.0f};
     std::optional<std::string> lastError;
     std::vector<std::shared_ptr<Effect>> retainedEffects;

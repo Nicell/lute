@@ -1,5 +1,7 @@
 #include "lute/ui/Context.h"
 
+#include "lute/ui/Style.h"
+
 #include <algorithm>
 #include <memory>
 #include <vector>
@@ -13,6 +15,16 @@ namespace
 bool isFocusableNode(const UiNode* node)
 {
     return node && node->focusable && !node->disabled;
+}
+
+bool isPointerInteractiveNode(const UiNode* node)
+{
+    return node && node->focusable && !node->disabled;
+}
+
+bool pointInsideNode(const UiNode* node, Vec2 point)
+{
+    return node && widgetHitBounds(*node).contains(point);
 }
 
 bool containsNode(const NodeTree& tree, NodeId root, NodeId target)
@@ -104,6 +116,8 @@ void UiContext::flush()
     NodeId id = resolveRoot(kInvalidNodeId);
     if (id == kInvalidNodeId)
         return;
+
+    clearInvalidInteractionState(id);
 
     if (tree.hasDirty(id, DirtyBits::Layout | DirtyBits::Text))
     {
@@ -215,6 +229,42 @@ std::optional<NodeId> UiContext::focusedNode() const
     return focusedNodeId;
 }
 
+std::optional<NodeId> UiContext::hoveredNode() const
+{
+    if (hoveredNodeId == kInvalidNodeId)
+        return std::nullopt;
+
+    NodeId root = resolveRoot(kInvalidNodeId);
+    if (root == kInvalidNodeId || !containsNode(tree, root, hoveredNodeId) || !isPointerInteractiveNode(tree.get(hoveredNodeId)))
+        return std::nullopt;
+
+    return hoveredNodeId;
+}
+
+std::optional<NodeId> UiContext::pressedNode() const
+{
+    if (pressedNodeId == kInvalidNodeId)
+        return std::nullopt;
+
+    NodeId root = resolveRoot(kInvalidNodeId);
+    if (root == kInvalidNodeId || !containsNode(tree, root, pressedNodeId) || !isPointerInteractiveNode(tree.get(pressedNodeId)))
+        return std::nullopt;
+
+    return pressedNodeId;
+}
+
+std::optional<NodeId> UiContext::capturedPointerNode() const
+{
+    if (pointerCaptureNodeId == kInvalidNodeId)
+        return std::nullopt;
+
+    NodeId root = resolveRoot(kInvalidNodeId);
+    if (root == kInvalidNodeId || !containsNode(tree, root, pointerCaptureNodeId) || !isPointerInteractiveNode(tree.get(pointerCaptureNodeId)))
+        return std::nullopt;
+
+    return pointerCaptureNodeId;
+}
+
 bool UiContext::dispatchPointer(const PointerEvent& event, NodeId root)
 {
     std::unique_ptr<ProfileFrameScope> frame;
@@ -226,22 +276,87 @@ bool UiContext::dispatchPointer(const PointerEvent& event, NodeId root)
     if (id == kInvalidNodeId)
         return false;
 
-    clearInvalidFocus(id);
+    clearInvalidInteractionState(id);
 
-    bool focusChanged = false;
+    bool stateChanged = false;
+    bool handled = false;
     {
         ProfileZone zone(ProfilePhase::Input);
-        if (event.kind == PointerEventKind::Down || event.kind == PointerEventKind::Up)
+
+        std::optional<NodeId> hit;
+        if (event.kind != PointerEventKind::Leave && event.kind != PointerEventKind::Cancel)
+            hit = inputRouter.hitTest(tree, id, event.position);
+
+        auto pointerInside = [&](NodeId nodeId) {
+            return pointInsideNode(tree.get(nodeId), event.position);
+        };
+
+        switch (event.kind)
         {
-            std::optional<NodeId> target = inputRouter.hitTest(tree, id, event.position);
-            if (target && isFocusableNode(tree.get(*target)))
-                focusChanged = setFocusedNode(*target, false);
-            else if (event.kind == PointerEventKind::Down)
-                focusChanged = clearFocus();
+        case PointerEventKind::Down:
+        {
+            stateChanged = setHoveredNode(hit.value_or(kInvalidNodeId)) || stateChanged;
+            if (hit && isFocusableNode(tree.get(*hit)))
+                stateChanged = setFocusedNode(*hit, false) || stateChanged;
+            else
+                stateChanged = clearFocus() || stateChanged;
+
+            if (hit && isPointerInteractiveNode(tree.get(*hit)))
+            {
+                pointerCaptureNodeId = *hit;
+                stateChanged = setPressedNode(*hit) || stateChanged;
+                handled = inputRouter.dispatchPointer(tree, *hit, event, true);
+            }
+            break;
+        }
+        case PointerEventKind::Move:
+        {
+            stateChanged = setHoveredNode(hit.value_or(kInvalidNodeId)) || stateChanged;
+            if (pointerCaptureNodeId != kInvalidNodeId)
+            {
+                bool insideCapture = pointerInside(pointerCaptureNodeId);
+                stateChanged = setPressedNode(insideCapture ? pointerCaptureNodeId : kInvalidNodeId) || stateChanged;
+                handled = inputRouter.dispatchPointer(tree, pointerCaptureNodeId, event, insideCapture);
+            }
+            break;
+        }
+        case PointerEventKind::Up:
+        {
+            stateChanged = setHoveredNode(hit.value_or(kInvalidNodeId)) || stateChanged;
+            if (pointerCaptureNodeId != kInvalidNodeId)
+            {
+                NodeId target = pointerCaptureNodeId;
+                bool insideCapture = pointerInside(target);
+                pointerCaptureNodeId = kInvalidNodeId;
+                stateChanged = true;
+                stateChanged = setPressedNode(kInvalidNodeId) || stateChanged;
+                handled = inputRouter.dispatchPointer(tree, target, event, insideCapture);
+            }
+            else if (hit)
+            {
+                if (isFocusableNode(tree.get(*hit)))
+                    stateChanged = setFocusedNode(*hit, false) || stateChanged;
+                handled = inputRouter.dispatchPointer(tree, *hit, event, true);
+            }
+            break;
+        }
+        case PointerEventKind::Leave:
+            stateChanged = setHoveredNode(kInvalidNodeId) || stateChanged;
+            if (pointerCaptureNodeId != kInvalidNodeId)
+                stateChanged = setPressedNode(kInvalidNodeId) || stateChanged;
+            break;
+        case PointerEventKind::Cancel:
+            if (pointerCaptureNodeId != kInvalidNodeId)
+            {
+                pointerCaptureNodeId = kInvalidNodeId;
+                stateChanged = true;
+            }
+            stateChanged = setHoveredNode(kInvalidNodeId) || stateChanged;
+            stateChanged = setPressedNode(kInvalidNodeId) || stateChanged;
+            break;
         }
 
-        bool handled = inputRouter.dispatchPointer(tree, id, event);
-        return handled || focusChanged;
+        return handled || stateChanged;
     }
 }
 
@@ -258,7 +373,7 @@ bool UiContext::dispatchKey(const KeyEvent& event, NodeId root)
 
     ProfileZone zone(ProfilePhase::Input);
 
-    clearInvalidFocus(id);
+    clearInvalidInteractionState(id);
 
     if (event.kind == KeyEventKind::Down && event.logical == LogicalKey::Tab)
         return focusNext(id, event.modifiers.shift);
@@ -266,8 +381,13 @@ bool UiContext::dispatchKey(const KeyEvent& event, NodeId root)
     if (focusedNodeId == kInvalidNodeId || !isFocusableNode(tree.get(focusedNodeId)))
         return false;
 
+    const UiNode* focusedNode = tree.get(focusedNodeId);
+    bool canActivateFocusedNode = focusedNode && focusedNode->onActivate != nullptr;
+
     if (event.logical == LogicalKey::Enter)
     {
+        if (!canActivateFocusedNode)
+            return false;
         if (event.kind != KeyEventKind::Down || event.repeat)
             return event.kind == KeyEventKind::Down;
 
@@ -276,13 +396,60 @@ bool UiContext::dispatchKey(const KeyEvent& event, NodeId root)
 
     if (event.logical == LogicalKey::Space)
     {
+        if (!canActivateFocusedNode)
+            return false;
         if (event.kind == KeyEventKind::Down)
+        {
+            setPressedNode(focusedNodeId);
             return true;
+        }
 
-        return inputRouter.dispatchCommand(tree, focusedNodeId, Command::Activate);
+        bool stateChanged = setPressedNode(kInvalidNodeId);
+        bool handled = inputRouter.dispatchCommand(tree, focusedNodeId, Command::Activate);
+        return handled || stateChanged;
     }
 
     return false;
+}
+
+bool UiContext::dispatchTextInput(const TextInputEvent& event, NodeId root)
+{
+    std::unique_ptr<ProfileFrameScope> frame;
+    if (!UiProfiler::isFrameActive())
+        frame = std::make_unique<ProfileFrameScope>(profileStore, nextFrameId(), "text_input");
+
+    flush();
+    NodeId id = resolveRoot(root);
+    if (id == kInvalidNodeId)
+        return false;
+
+    ProfileZone zone(ProfilePhase::Input);
+
+    clearInvalidInteractionState(id);
+    if (focusedNodeId == kInvalidNodeId || !isFocusableNode(tree.get(focusedNodeId)))
+        return false;
+
+    return inputRouter.dispatchTextInput(tree, focusedNodeId, event);
+}
+
+bool UiContext::dispatchImeComposition(const ImeCompositionEvent& event, NodeId root)
+{
+    std::unique_ptr<ProfileFrameScope> frame;
+    if (!UiProfiler::isFrameActive())
+        frame = std::make_unique<ProfileFrameScope>(profileStore, nextFrameId(), "ime");
+
+    flush();
+    NodeId id = resolveRoot(root);
+    if (id == kInvalidNodeId)
+        return false;
+
+    ProfileZone zone(ProfilePhase::Input);
+
+    clearInvalidInteractionState(id);
+    if (focusedNodeId == kInvalidNodeId || !isFocusableNode(tree.get(focusedNodeId)))
+        return false;
+
+    return inputRouter.dispatchImeComposition(tree, focusedNodeId, event);
 }
 
 const Scene& UiContext::currentScene() const
@@ -371,6 +538,46 @@ bool UiContext::setFocusedNode(NodeId id, bool focusVisible)
         tree.setFocused(previous, false, false);
     if (focusedNodeId != kInvalidNodeId)
         tree.setFocused(focusedNodeId, true, focusVisible);
+    if (pointerCaptureNodeId == kInvalidNodeId && pressedNodeId != kInvalidNodeId && pressedNodeId != focusedNodeId)
+        setPressedNode(kInvalidNodeId);
+
+    return true;
+}
+
+bool UiContext::setHoveredNode(NodeId id)
+{
+    if (id != kInvalidNodeId && !isPointerInteractiveNode(tree.get(id)))
+        id = kInvalidNodeId;
+
+    if (hoveredNodeId == id)
+        return false;
+
+    NodeId previous = hoveredNodeId;
+    hoveredNodeId = id;
+
+    if (previous != kInvalidNodeId)
+        tree.setHovered(previous, false);
+    if (hoveredNodeId != kInvalidNodeId)
+        tree.setHovered(hoveredNodeId, true);
+
+    return true;
+}
+
+bool UiContext::setPressedNode(NodeId id)
+{
+    if (id != kInvalidNodeId && !isPointerInteractiveNode(tree.get(id)))
+        id = kInvalidNodeId;
+
+    if (pressedNodeId == id)
+        return false;
+
+    NodeId previous = pressedNodeId;
+    pressedNodeId = id;
+
+    if (previous != kInvalidNodeId)
+        tree.setPressed(previous, false);
+    if (pressedNodeId != kInvalidNodeId)
+        tree.setPressed(pressedNodeId, true);
 
     return true;
 }
@@ -413,6 +620,24 @@ void UiContext::clearInvalidFocus(NodeId root)
 
     if (!containsNode(tree, root, focusedNodeId) || !isFocusableNode(tree.get(focusedNodeId)))
         clearFocus();
+}
+
+void UiContext::clearInvalidInteractionState(NodeId root)
+{
+    clearInvalidFocus(root);
+
+    if (hoveredNodeId != kInvalidNodeId && (!containsNode(tree, root, hoveredNodeId) || !isPointerInteractiveNode(tree.get(hoveredNodeId))))
+        setHoveredNode(kInvalidNodeId);
+
+    if (pressedNodeId != kInvalidNodeId && (!containsNode(tree, root, pressedNodeId) || !isPointerInteractiveNode(tree.get(pressedNodeId))))
+        setPressedNode(kInvalidNodeId);
+
+    if (pointerCaptureNodeId != kInvalidNodeId &&
+        (!containsNode(tree, root, pointerCaptureNodeId) || !isPointerInteractiveNode(tree.get(pointerCaptureNodeId))))
+    {
+        pointerCaptureNodeId = kInvalidNodeId;
+        setPressedNode(kInvalidNodeId);
+    }
 }
 
 } // namespace lute::ui

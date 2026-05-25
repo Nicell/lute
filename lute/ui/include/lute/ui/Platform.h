@@ -85,6 +85,8 @@ NativeTextServices& nativeTextServices();
 
 bool dispatchNativePointer(UiContext& context, const PointerEvent& event, NodeId root = kInvalidNodeId);
 bool dispatchNativeKey(UiContext& context, const KeyEvent& event, NodeId root = kInvalidNodeId);
+bool dispatchNativeTextInput(UiContext& context, const TextInputEvent& event, NodeId root = kInvalidNodeId);
+bool dispatchNativeImeComposition(UiContext& context, const ImeCompositionEvent& event, NodeId root = kInvalidNodeId);
 bool dispatchNativeAccessibilityAction(UiContext& context, SemanticNodeId id, SemanticAction action);
 bool renderNativeFrame(UiContext& context, const NativeFrame& frame);
 bool renderNativeFrame(UiContext& context, NativeWindowSurface& surface);

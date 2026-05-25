@@ -1,4 +1,5 @@
 #include "lute/ui/Node.h"
+#include "lute/ui/Input.h"
 #include "lute/ui/Profile.h"
 #include "lute/ui/Text.h"
 
@@ -30,6 +31,10 @@ static void dumpNode(const NodeTree& tree, NodeId id, int depth, std::ostringstr
         out << " focused";
     if (node->focusVisible)
         out << " focus-visible";
+    if (node->hovered)
+        out << " hovered";
+    if (node->pressed)
+        out << " pressed";
     out << " dirty=" << dirtyBitsToString(node->dirty) << "\n";
 
     for (NodeId child : node->children)
@@ -262,6 +267,26 @@ void NodeTree::setFocused(NodeId id, bool focused, bool focusVisible)
     markDirty(id, DirtyBits::State | DirtyBits::Paint | DirtyBits::Scene | DirtyBits::Semantics);
 }
 
+void NodeTree::setHovered(NodeId id, bool hovered)
+{
+    UiNode* node = get(id);
+    if (!node || node->hovered == hovered)
+        return;
+
+    node->hovered = hovered;
+    markDirty(id, DirtyBits::State | DirtyBits::Paint | DirtyBits::Scene);
+}
+
+void NodeTree::setPressed(NodeId id, bool pressed)
+{
+    UiNode* node = get(id);
+    if (!node || node->pressed == pressed)
+        return;
+
+    node->pressed = pressed;
+    markDirty(id, DirtyBits::State | DirtyBits::Paint | DirtyBits::Scene);
+}
+
 void NodeTree::setOnActivate(NodeId id, std::function<void()> callback)
 {
     UiNode* node = get(id);
@@ -269,6 +294,28 @@ void NodeTree::setOnActivate(NodeId id, std::function<void()> callback)
         return;
 
     node->onActivate = std::move(callback);
+    node->focusable = true;
+    markDirty(id, DirtyBits::Semantics);
+}
+
+void NodeTree::setOnTextInput(NodeId id, std::function<void(const TextInputEvent&)> callback)
+{
+    UiNode* node = get(id);
+    if (!node)
+        return;
+
+    node->onTextInput = std::move(callback);
+    node->focusable = true;
+    markDirty(id, DirtyBits::Semantics);
+}
+
+void NodeTree::setOnImeComposition(NodeId id, std::function<void(const ImeCompositionEvent&)> callback)
+{
+    UiNode* node = get(id);
+    if (!node)
+        return;
+
+    node->onImeComposition = std::move(callback);
     node->focusable = true;
     markDirty(id, DirtyBits::Semantics);
 }

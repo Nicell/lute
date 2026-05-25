@@ -51,13 +51,21 @@ inline Rect inset(Rect rect, EdgeInsets insets)
 inline ControlMetrics resolveButtonMetrics(const UiNode& node)
 {
     EdgeInsets padding = hasExplicitPadding(node.padding) ? node.padding : EdgeInsets{6.0f, 12.0f, 6.0f, 12.0f};
+    Color fillColor = {38, 101, 214, 255};
+    if (node.pressed)
+        fillColor = {28, 83, 190, 255};
+    else if (node.hovered)
+        fillColor = {47, 111, 225, 255};
+    if (node.disabled)
+        fillColor.a = 120;
+
     return {
         padding,
         {64.0f, 32.0f},
         15.0f,
         6.0f,
         3.0f,
-        {38, 101, 214, node.disabled ? uint8_t(120) : uint8_t(255)},
+        fillColor,
         kButtonTextColor,
         kFocusRingColor,
     };
