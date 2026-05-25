@@ -10,7 +10,7 @@ local root = ui.window {
 		padding = 24,
 
 		ui.text(function()
-			return `Count: {count:get()}`
+			return `🧮 Count: {count:get()}`
 		end),
 
 		ui.button {

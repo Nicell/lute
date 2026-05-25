@@ -11,6 +11,12 @@
 #include "hb-ot.h"
 #endif
 
+#if defined(__APPLE__) && LUTE_UI_USE_HARFBUZZ_GPU
+#include <CoreFoundation/CoreFoundation.h>
+#include <CoreGraphics/CoreGraphics.h>
+#include <ImageIO/ImageIO.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -19,6 +25,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -33,6 +40,8 @@ namespace
 {
 
 constexpr uint64_t kAtlasCapacity = 256 * 1024;
+constexpr uint32_t kImageAtlasSize = 2048;
+constexpr uint32_t kImageAtlasPadding = 1;
 
 struct AdapterRequest
 {
@@ -78,6 +87,12 @@ struct GlyphVertex
     float color[4] = {};
 };
 
+struct ImageGlyphVertex
+{
+    float position[2] = {};
+    float texcoord[2] = {};
+};
+
 struct EncodedGlyph
 {
     float minX = 0.0f;
@@ -85,7 +100,49 @@ struct EncodedGlyph
     float maxX = 0.0f;
     float maxY = 0.0f;
     uint32_t atlasOffset = 0;
+    uint32_t renderMode = 0;
     bool empty = true;
+};
+
+struct ImageGlyph
+{
+    float minX = 0.0f;
+    float minY = 0.0f;
+    float maxX = 0.0f;
+    float maxY = 0.0f;
+    float u0 = 0.0f;
+    float v0 = 0.0f;
+    float u1 = 0.0f;
+    float v1 = 0.0f;
+    bool empty = true;
+};
+
+struct DecodedImage
+{
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::vector<uint8_t> pixels;
+};
+
+struct GlyphCacheKey
+{
+    const FontFace* fontFace = nullptr;
+    uint32_t glyph = 0;
+    uint32_t variant = 0;
+
+    bool operator==(const GlyphCacheKey& other) const
+    {
+        return fontFace == other.fontFace && glyph == other.glyph && variant == other.variant;
+    }
+};
+
+struct GlyphCacheKeyHash
+{
+    size_t operator()(const GlyphCacheKey& key) const
+    {
+        return (reinterpret_cast<uintptr_t>(key.fontFace) >> 4) ^ (static_cast<size_t>(key.glyph) * 0x9e3779b1u) ^
+            (static_cast<size_t>(key.variant) * 0x85ebca6bu);
+    }
 };
 
 static uint64_t alignTo(uint64_t value, uint64_t alignment)
@@ -269,12 +326,123 @@ static void appendGlyphVertices(
     vertices.push_back(quad[3]);
 }
 
+static void appendImageGlyphVertices(
+    std::vector<ImageGlyphVertex>& vertices,
+    float x,
+    float y,
+    float fontSize,
+    uint32_t upem,
+    const ImageGlyph& glyph
+)
+{
+    if (glyph.empty || upem == 0 || fontSize <= 0.0f)
+        return;
+
+    float scale = fontSize / static_cast<float>(upem);
+    ImageGlyphVertex quad[4];
+
+    for (int i = 0; i < 4; i++)
+    {
+        int cornerX = (i >> 1) & 1;
+        int cornerY = i & 1;
+
+        float ex = cornerX ? glyph.maxX : glyph.minX;
+        float ey = cornerY ? glyph.maxY : glyph.minY;
+
+        ImageGlyphVertex vertex;
+        vertex.position[0] = x + scale * ex;
+        vertex.position[1] = y - scale * ey;
+        vertex.texcoord[0] = cornerX ? glyph.u1 : glyph.u0;
+        vertex.texcoord[1] = cornerY ? glyph.v0 : glyph.v1;
+        quad[i] = vertex;
+    }
+
+    vertices.push_back(quad[0]);
+    vertices.push_back(quad[1]);
+    vertices.push_back(quad[2]);
+
+    vertices.push_back(quad[1]);
+    vertices.push_back(quad[2]);
+    vertices.push_back(quad[3]);
+}
+
+#if LUTE_UI_USE_HARFBUZZ_GPU && defined(__APPLE__)
+static std::optional<DecodedImage> decodeImageBlob(hb_blob_t* blob)
+{
+    if (!blob)
+        return std::nullopt;
+
+    unsigned int length = 0;
+    const char* data = hb_blob_get_data(blob, &length);
+    if (!data || length == 0)
+        return std::nullopt;
+
+    CFDataRef cfData = CFDataCreate(kCFAllocatorDefault, reinterpret_cast<const UInt8*>(data), static_cast<CFIndex>(length));
+    if (!cfData)
+        return std::nullopt;
+
+    CGImageSourceRef source = CGImageSourceCreateWithData(cfData, nullptr);
+    CFRelease(cfData);
+    if (!source)
+        return std::nullopt;
+
+    CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, nullptr);
+    CFRelease(source);
+    if (!image)
+        return std::nullopt;
+
+    size_t width = CGImageGetWidth(image);
+    size_t height = CGImageGetHeight(image);
+    if (width == 0 || height == 0 || width > kImageAtlasSize || height > kImageAtlasSize)
+    {
+        CGImageRelease(image);
+        return std::nullopt;
+    }
+
+    DecodedImage decoded;
+    decoded.width = static_cast<uint32_t>(width);
+    decoded.height = static_cast<uint32_t>(height);
+    decoded.pixels.assign(width * height * 4, 0);
+
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef context = CGBitmapContextCreate(
+        decoded.pixels.data(),
+        width,
+        height,
+        8,
+        width * 4,
+        colorSpace,
+        static_cast<CGBitmapInfo>(kCGBitmapByteOrder32Big) | static_cast<CGBitmapInfo>(kCGImageAlphaPremultipliedLast)
+    );
+
+    if (colorSpace)
+        CGColorSpaceRelease(colorSpace);
+
+    if (!context)
+    {
+        CGImageRelease(image);
+        return std::nullopt;
+    }
+
+    CGContextDrawImage(context, CGRectMake(0.0, 0.0, static_cast<CGFloat>(width), static_cast<CGFloat>(height)), image);
+    CGContextRelease(context);
+    CGImageRelease(image);
+    return decoded;
+}
+#elif LUTE_UI_USE_HARFBUZZ_GPU
+static std::optional<DecodedImage> decodeImageBlob(hb_blob_t*)
+{
+    return std::nullopt;
+}
+#endif
+
 class DawnBackend
 {
 public:
     ~DawnBackend()
     {
 #if LUTE_UI_USE_HARFBUZZ_GPU
+        hb_gpu_draw_destroy(draw);
         hb_gpu_paint_destroy(paint);
 #endif
     }
@@ -442,17 +610,34 @@ private:
         queue = {};
         solidPipeline = {};
         textPipeline = {};
+        paintTextPipeline = {};
+        imageGlyphPipeline = {};
         surfaceBindGroupLayout = {};
         textBindGroupLayout = {};
+        imageGlyphBindGroupLayout = {};
         surfaceBindGroup = {};
         textBindGroup = {};
+        imageGlyphBindGroup = {};
         surfaceUniformBuffer = {};
         textUniformBuffer = {};
         solidVertexBuffer = {};
         glyphVertexBuffer = {};
+        paintGlyphVertexBuffer = {};
+        imageGlyphVertexBuffer = {};
         atlasBuffer = {};
+        imageAtlasTexture = {};
+        imageAtlasTextureView = {};
+        imageAtlasSampler = {};
         solidVertexCapacity = 0;
         glyphVertexCapacity = 0;
+        paintGlyphVertexCapacity = 0;
+        imageGlyphVertexCapacity = 0;
+#if LUTE_UI_USE_HARFBUZZ_GPU
+        imageGlyphCache.clear();
+#endif
+        imageAtlasCursorX = 0;
+        imageAtlasCursorY = 0;
+        imageAtlasRowHeight = 0;
         if (clearSurface)
         {
             surface = {};
@@ -521,8 +706,10 @@ private:
             return false;
 
         std::vector<SolidVertex> solidVertices;
-        std::vector<GlyphVertex> glyphVertices;
-        buildSceneVertices(scene, solidVertices, glyphVertices, scale);
+        std::vector<GlyphVertex> drawGlyphVertices;
+        std::vector<GlyphVertex> paintGlyphVertices;
+        std::vector<ImageGlyphVertex> imageGlyphVertices;
+        buildSceneVertices(scene, solidVertices, drawGlyphVertices, paintGlyphVertices, imageGlyphVertices, scale);
 
         SurfaceUniforms surfaceUniforms;
         surfaceUniforms.viewport[0] = static_cast<float>(width);
@@ -538,7 +725,9 @@ private:
 #endif
 
         writeVertexData(solidVertexBuffer, solidVertexCapacity, solidVertices);
-        writeVertexData(glyphVertexBuffer, glyphVertexCapacity, glyphVertices);
+        writeVertexData(glyphVertexBuffer, glyphVertexCapacity, drawGlyphVertices);
+        writeVertexData(paintGlyphVertexBuffer, paintGlyphVertexCapacity, paintGlyphVertices);
+        writeVertexData(imageGlyphVertexBuffer, imageGlyphVertexCapacity, imageGlyphVertices);
 
         if (atlasDirty && atlasCursor > 0)
         {
@@ -566,12 +755,29 @@ private:
             pass.Draw(static_cast<uint32_t>(solidVertices.size()));
         }
 
-        if (!glyphVertices.empty())
+        if (!drawGlyphVertices.empty())
         {
             pass.SetPipeline(textPipeline);
             pass.SetBindGroup(0, textBindGroup);
-            pass.SetVertexBuffer(0, glyphVertexBuffer, 0, glyphVertices.size() * sizeof(GlyphVertex));
-            pass.Draw(static_cast<uint32_t>(glyphVertices.size()));
+            pass.SetVertexBuffer(0, glyphVertexBuffer, 0, drawGlyphVertices.size() * sizeof(GlyphVertex));
+            pass.Draw(static_cast<uint32_t>(drawGlyphVertices.size()));
+        }
+
+        if (!paintGlyphVertices.empty())
+        {
+            pass.SetPipeline(paintTextPipeline);
+            pass.SetBindGroup(0, textBindGroup);
+            pass.SetVertexBuffer(0, paintGlyphVertexBuffer, 0, paintGlyphVertices.size() * sizeof(GlyphVertex));
+            pass.Draw(static_cast<uint32_t>(paintGlyphVertices.size()));
+        }
+
+        if (!imageGlyphVertices.empty())
+        {
+            pass.SetPipeline(imageGlyphPipeline);
+            pass.SetBindGroup(0, surfaceBindGroup);
+            pass.SetBindGroup(1, imageGlyphBindGroup);
+            pass.SetVertexBuffer(0, imageGlyphVertexBuffer, 0, imageGlyphVertices.size() * sizeof(ImageGlyphVertex));
+            pass.Draw(static_cast<uint32_t>(imageGlyphVertices.size()));
         }
         pass.End();
 
@@ -581,7 +787,14 @@ private:
         return true;
     }
 
-    void buildSceneVertices(const Scene& scene, std::vector<SolidVertex>& solidVertices, std::vector<GlyphVertex>& glyphVertices, float scale)
+    void buildSceneVertices(
+        const Scene& scene,
+        std::vector<SolidVertex>& solidVertices,
+        std::vector<GlyphVertex>& drawGlyphVertices,
+        std::vector<GlyphVertex>& paintGlyphVertices,
+        std::vector<ImageGlyphVertex>& imageGlyphVertices,
+        float scale
+    )
     {
         for (const DisplayItem& item : scene.items())
         {
@@ -594,7 +807,7 @@ private:
                 appendSolidRect(solidVertices, item.rect, item.radius, item.fill.color, scale);
                 break;
             case DisplayItemKind::TextRun:
-                appendTextRun(glyphVertices, item, scale);
+                appendTextRun(drawGlyphVertices, paintGlyphVertices, imageGlyphVertices, item, scale);
                 break;
             case DisplayItemKind::ClipPush:
             case DisplayItemKind::ClipPop:
@@ -607,10 +820,16 @@ private:
         }
     }
 
-    void appendTextRun(std::vector<GlyphVertex>& vertices, const DisplayItem& item, float scale)
+    void appendTextRun(
+        std::vector<GlyphVertex>& drawVertices,
+        std::vector<GlyphVertex>& paintVertices,
+        std::vector<ImageGlyphVertex>& imageVertices,
+        const DisplayItem& item,
+        float scale
+    )
     {
 #if LUTE_UI_USE_HARFBUZZ_GPU
-        if (item.text.empty() || !ensureFont())
+        if (item.text.empty() || !ensureGlyphEncoders())
             return;
 
         TextShaper shaper;
@@ -618,7 +837,6 @@ private:
         if (run.glyphs.empty())
             return;
 
-        uint32_t upem = activeFontFace ? activeFontFace->unitsPerEm() : 1000;
         float fontSize = run.fontSize * scale;
         float penX = item.origin.x * scale;
         float penY = item.origin.y * scale;
@@ -626,88 +844,266 @@ private:
 
         for (const ShapedGlyph& shaped : run.glyphs)
         {
-            const EncodedGlyph* glyph = lookupGlyph(shaped.id);
-            if (glyph)
+            const FontFace* glyphFont = shaped.fontFace ? shaped.fontFace : &defaultUiFontFace();
+            uint32_t upem = glyphFont->unitsPerEm();
+            float glyphX = penX + shaped.xOffset * scale;
+            float glyphY = penY - shaped.yOffset * scale;
+
+            uint32_t imagePpem = static_cast<uint32_t>(std::max(1.0f, std::ceil(fontSize)));
+            if (glyphFont->prefersPlatformGlyphMetrics())
             {
-                float glyphX = penX + shaped.xOffset * scale;
-                float glyphY = penY - shaped.yOffset * scale;
-                appendGlyphVertices(vertices, glyphX, glyphY, fontSize, upem, *glyph, color);
+                GlyphMetrics metrics = glyphFont->glyphMetrics(shaped.id, run.fontSize);
+                if (metrics.available && metrics.height != 0.0f)
+                    imagePpem = static_cast<uint32_t>(std::max(1.0f, std::ceil(std::abs(metrics.height) * scale)));
+            }
+
+            const ImageGlyph* imageGlyph = lookupImageGlyph(*glyphFont, shaped.id, imagePpem);
+            if (imageGlyph && !imageGlyph->empty)
+            {
+                appendImageGlyphVertices(imageVertices, glyphX, glyphY, fontSize, upem, *imageGlyph);
+            }
+            else
+            {
+                const EncodedGlyph* glyph = lookupVectorGlyph(*glyphFont, shaped.id);
+                if (glyph)
+                {
+                    std::vector<GlyphVertex>& target = glyph->renderMode == 1 ? paintVertices : drawVertices;
+                    appendGlyphVertices(target, glyphX, glyphY, fontSize, upem, *glyph, color);
+                }
             }
 
             penX += shaped.xAdvance * scale;
             penY -= shaped.yAdvance * scale;
         }
 #else
-        (void)vertices;
+        (void)drawVertices;
+        (void)paintVertices;
+        (void)imageVertices;
         (void)item;
         (void)scale;
 #endif
     }
 
 #if LUTE_UI_USE_HARFBUZZ_GPU
-    bool ensureFont()
+    bool ensureGlyphEncoders()
     {
-        const FontFace& fontFace = defaultUiFontFace();
-        if (!fontFace.available() || !fontFace.harfbuzzFont())
-            return false;
-
-        if (activeFontFace != &fontFace)
-        {
-            glyphCache.clear();
-            atlasCursor = 0;
-            if (!atlasShadow.empty())
-                std::fill(atlasShadow.begin(), atlasShadow.end(), 0);
-            atlasDirty = true;
-            activeFontFace = &fontFace;
-        }
-
-        if (paint)
+        if (draw && paint)
             return true;
 
-        paint = hb_gpu_paint_create_or_fail();
+        if (!draw)
+            draw = hb_gpu_draw_create_or_fail();
         if (!paint)
+            paint = hb_gpu_paint_create_or_fail();
+
+        if (!draw || !paint)
             return false;
 
-        uint32_t upem = fontFace.unitsPerEm();
-        hb_gpu_paint_set_scale(paint, static_cast<int>(upem), static_cast<int>(upem));
         return true;
     }
 
-    const EncodedGlyph* lookupGlyph(hb_codepoint_t glyph)
+    const EncodedGlyph* lookupVectorGlyph(const FontFace& fontFace, hb_codepoint_t glyph)
     {
-        auto found = glyphCache.find(glyph);
+        GlyphCacheKey key{&fontFace, glyph, 0};
+        auto found = glyphCache.find(key);
         if (found != glyphCache.end())
             return &found->second;
 
-        if (!paint || !activeFontFace || !activeFontFace->harfbuzzFont())
+        if (!draw || !paint || !fontFace.harfbuzzFont())
             return nullptr;
 
+        EncodedGlyph result;
+        if (tryEncodePaintGlyph(fontFace, glyph, result) || tryEncodeDrawGlyph(fontFace, glyph, result))
+        {
+            auto [inserted, _] = glyphCache.emplace(key, result);
+            return &inserted->second;
+        }
+
+        auto [inserted, _] = glyphCache.emplace(key, result);
+        return &inserted->second;
+    }
+
+    bool tryEncodePaintGlyph(const FontFace& fontFace, hb_codepoint_t glyph, EncodedGlyph& result)
+    {
+        hb_face_t* face = fontFace.harfbuzzFace();
+        if (!face || (!hb_ot_color_has_paint(face) && !hb_ot_color_has_layers(face)))
+            return false;
+
         hb_gpu_paint_clear(paint);
-        hb_gpu_paint_glyph(paint, activeFontFace->harfbuzzFont(), glyph);
+        hb_gpu_paint_set_scale(paint, static_cast<int>(fontFace.unitsPerEm()), static_cast<int>(fontFace.unitsPerEm()));
+        if (!hb_gpu_paint_glyph_or_fail(paint, fontFace.harfbuzzFont(), glyph))
+            return false;
 
         hb_glyph_extents_t extents = {};
         hb_blob_t* encoded = hb_gpu_paint_encode(paint, &extents);
-        unsigned int encodedLength = encoded ? hb_blob_get_length(encoded) : 0;
-
-        EncodedGlyph result;
-        result.minX = static_cast<float>(extents.x_bearing);
-        result.maxX = static_cast<float>(extents.x_bearing + extents.width);
-        result.maxY = static_cast<float>(extents.y_bearing);
-        result.minY = static_cast<float>(extents.y_bearing + extents.height);
-        result.empty = encodedLength == 0;
-
-        if (!result.empty)
-        {
-            const char* encodedData = hb_blob_get_data(encoded, &encodedLength);
-            if (!encodedData || !appendAtlas(encodedData, encodedLength, result.atlasOffset))
-                result.empty = true;
-        }
+        bool ok = finishEncodedGlyph(encoded, extents, 1, result);
 
         if (encoded)
             hb_gpu_paint_recycle_blob(paint, encoded);
 
-        auto [inserted, _] = glyphCache.emplace(glyph, result);
+        return ok;
+    }
+
+    bool tryEncodeDrawGlyph(const FontFace& fontFace, hb_codepoint_t glyph, EncodedGlyph& result)
+    {
+        hb_gpu_draw_clear(draw);
+        hb_gpu_draw_set_scale(draw, static_cast<int>(fontFace.unitsPerEm()), static_cast<int>(fontFace.unitsPerEm()));
+        if (!hb_gpu_draw_glyph_or_fail(draw, fontFace.harfbuzzFont(), glyph))
+            return false;
+
+        hb_glyph_extents_t extents = {};
+        hb_blob_t* encoded = hb_gpu_draw_encode(draw, &extents);
+        bool ok = finishEncodedGlyph(encoded, extents, 0, result);
+
+        if (encoded)
+            hb_gpu_draw_recycle_blob(draw, encoded);
+
+        return ok;
+    }
+
+    bool finishEncodedGlyph(hb_blob_t* encoded, const hb_glyph_extents_t& extents, uint32_t renderMode, EncodedGlyph& result)
+    {
+        unsigned int encodedLength = encoded ? hb_blob_get_length(encoded) : 0;
+        result.minX = static_cast<float>(extents.x_bearing);
+        result.maxX = static_cast<float>(extents.x_bearing + extents.width);
+        result.maxY = static_cast<float>(extents.y_bearing);
+        result.minY = static_cast<float>(extents.y_bearing + extents.height);
+        result.renderMode = renderMode;
+        result.empty = encodedLength == 0;
+
+        if (result.empty)
+            return false;
+
+        const char* encodedData = hb_blob_get_data(encoded, &encodedLength);
+        if (!encodedData || !appendAtlas(encodedData, encodedLength, result.atlasOffset))
+        {
+            result.empty = true;
+            return false;
+        }
+
+        return true;
+    }
+
+    const ImageGlyph* lookupImageGlyph(const FontFace& fontFace, hb_codepoint_t glyph, uint32_t targetPpem)
+    {
+        GlyphCacheKey key{&fontFace, glyph, targetPpem};
+        auto found = imageGlyphCache.find(key);
+        if (found != imageGlyphCache.end())
+            return &found->second;
+
+        ImageGlyph result;
+        if (fontFace.harfbuzzFace() && fontFace.harfbuzzFont())
+        {
+            hb_font_t* pngFont = hb_font_create_sub_font(fontFace.harfbuzzFont());
+            if (pngFont)
+                hb_font_set_ppem(pngFont, targetPpem, targetPpem);
+            hb_blob_t* image = hb_ot_color_glyph_reference_png(pngFont ? pngFont : fontFace.harfbuzzFont(), glyph);
+            if (pngFont)
+                hb_font_destroy(pngFont);
+            unsigned int imageLength = image ? hb_blob_get_length(image) : 0;
+            if ((!image || imageLength == 0) && hb_ot_color_has_svg(fontFace.harfbuzzFace()))
+            {
+                if (image)
+                    hb_blob_destroy(image);
+                image = hb_ot_color_glyph_reference_svg(fontFace.harfbuzzFace(), glyph);
+                imageLength = image ? hb_blob_get_length(image) : 0;
+            }
+
+            if (image && imageLength > 0)
+            {
+                std::optional<DecodedImage> decoded = decodeImageBlob(image);
+                if (decoded)
+                    result = uploadImageGlyph(fontFace, glyph, *decoded);
+            }
+
+            if (image)
+                hb_blob_destroy(image);
+        }
+
+        auto [inserted, _] = imageGlyphCache.emplace(key, result);
         return &inserted->second;
+    }
+
+    ImageGlyph uploadImageGlyph(const FontFace& fontFace, hb_codepoint_t glyph, const DecodedImage& image)
+    {
+        ImageGlyph result;
+        if (!imageAtlasTexture || image.width == 0 || image.height == 0 || image.pixels.empty())
+            return result;
+
+        uint32_t atlasX = 0;
+        uint32_t atlasY = 0;
+        if (!allocateImageAtlas(image.width, image.height, atlasX, atlasY))
+            return result;
+
+        wgpu::TexelCopyTextureInfo destination;
+        destination.texture = imageAtlasTexture;
+        destination.origin = {atlasX, atlasY, 0};
+        destination.aspect = wgpu::TextureAspect::All;
+
+        wgpu::TexelCopyBufferLayout layout;
+        layout.bytesPerRow = image.width * 4;
+        layout.rowsPerImage = image.height;
+
+        wgpu::Extent3D size{image.width, image.height, 1};
+        queue.WriteTexture(&destination, image.pixels.data(), image.pixels.size(), &layout, &size);
+
+        hb_glyph_extents_t extents = {};
+        bool usedPlatformMetrics = false;
+        GlyphMetrics platformMetrics = fontFace.glyphMetrics(glyph, kDefaultUiFontSize);
+        if (fontFace.prefersPlatformGlyphMetrics() && platformMetrics.available && platformMetrics.width > 0.0f && platformMetrics.height != 0.0f)
+        {
+            float unitsPerPixel = static_cast<float>(fontFace.unitsPerEm()) / kDefaultUiFontSize;
+            result.minX = platformMetrics.xBearing * unitsPerPixel;
+            result.maxX = (platformMetrics.xBearing + platformMetrics.width) * unitsPerPixel;
+            result.maxY = platformMetrics.yBearing * unitsPerPixel;
+            result.minY = (platformMetrics.yBearing + platformMetrics.height) * unitsPerPixel;
+            usedPlatformMetrics = true;
+        }
+        else if (!hb_font_get_glyph_extents(fontFace.harfbuzzFont(), glyph, &extents) || extents.width == 0 || extents.height == 0)
+        {
+            float upem = static_cast<float>(fontFace.unitsPerEm());
+            float aspect = static_cast<float>(image.width) / static_cast<float>(std::max<uint32_t>(image.height, 1));
+            extents.x_bearing = 0;
+            extents.y_bearing = static_cast<hb_position_t>(upem * 0.8f);
+            extents.width = static_cast<hb_position_t>(upem * aspect);
+            extents.height = -static_cast<hb_position_t>(upem);
+        }
+
+        if (!usedPlatformMetrics)
+        {
+            result.minX = static_cast<float>(extents.x_bearing);
+            result.maxX = static_cast<float>(extents.x_bearing + extents.width);
+            result.maxY = static_cast<float>(extents.y_bearing);
+            result.minY = static_cast<float>(extents.y_bearing + extents.height);
+        }
+
+        result.u0 = (static_cast<float>(atlasX) + 0.5f) / static_cast<float>(kImageAtlasSize);
+        result.v0 = (static_cast<float>(atlasY) + 0.5f) / static_cast<float>(kImageAtlasSize);
+        result.u1 = (static_cast<float>(atlasX + image.width) - 0.5f) / static_cast<float>(kImageAtlasSize);
+        result.v1 = (static_cast<float>(atlasY + image.height) - 0.5f) / static_cast<float>(kImageAtlasSize);
+        result.empty = result.maxX <= result.minX || result.maxY <= result.minY;
+        return result;
+    }
+
+    bool allocateImageAtlas(uint32_t width, uint32_t height, uint32_t& x, uint32_t& y)
+    {
+        if (width + kImageAtlasPadding > kImageAtlasSize || height + kImageAtlasPadding > kImageAtlasSize)
+            return false;
+
+        if (imageAtlasCursorX + width + kImageAtlasPadding > kImageAtlasSize)
+        {
+            imageAtlasCursorX = 0;
+            imageAtlasCursorY += imageAtlasRowHeight + kImageAtlasPadding;
+            imageAtlasRowHeight = 0;
+        }
+
+        if (imageAtlasCursorY + height + kImageAtlasPadding > kImageAtlasSize)
+            return false;
+
+        x = imageAtlasCursorX;
+        y = imageAtlasCursorY;
+        imageAtlasCursorX += width + kImageAtlasPadding;
+        imageAtlasRowHeight = std::max(imageAtlasRowHeight, height);
+        return true;
     }
 
     bool appendAtlas(const char* data, unsigned int length, uint32_t& offset)
@@ -765,11 +1161,13 @@ private:
             pipelineFormat = format;
             solidPipeline = {};
             textPipeline = {};
+            paintTextPipeline = {};
+            imageGlyphPipeline = {};
             surfaceBindGroup = {};
             textBindGroup = {};
         }
 
-        return ensureSolidPipeline(format) && ensureTextPipeline(format);
+        return ensureSolidPipeline(format) && ensureTextPipeline(format) && ensureImageGlyphPipeline(format);
     }
 
     bool ensureSolidPipeline(wgpu::TextureFormat format)
@@ -918,7 +1316,7 @@ fn clip_from_pixel(position: vec2f) -> vec4f {
         (void)format;
         return true;
 #else
-        if (textPipeline && textBindGroup)
+        if (textPipeline && paintTextPipeline && textBindGroup)
             return true;
 
         if (!textUniformBuffer)
@@ -965,18 +1363,16 @@ fn clip_from_pixel(position: vec2f) -> vec4f {
         bindGroupDescriptor.entries = bindGroupEntries;
         textBindGroup = device.CreateBindGroup(&bindGroupDescriptor);
 
-        std::string shaderSource;
-        shaderSource += hb_gpu_shader_source(HB_GPU_SHADER_STAGE_VERTEX, HB_GPU_SHADER_LANG_WGSL);
-        shaderSource += "\n";
-        shaderSource += hb_gpu_draw_shader_source(HB_GPU_SHADER_STAGE_VERTEX, HB_GPU_SHADER_LANG_WGSL);
-        shaderSource += "\n";
-        shaderSource += hb_gpu_shader_source(HB_GPU_SHADER_STAGE_FRAGMENT, HB_GPU_SHADER_LANG_WGSL);
-        shaderSource += "\n";
-        shaderSource += hb_gpu_draw_shader_source(HB_GPU_SHADER_STAGE_FRAGMENT, HB_GPU_SHADER_LANG_WGSL);
-        shaderSource += "\n";
-        shaderSource += hb_gpu_paint_shader_source(HB_GPU_SHADER_STAGE_FRAGMENT, HB_GPU_SHADER_LANG_WGSL);
-        shaderSource += "\n";
-        shaderSource += R"(
+        std::string commonShaderSource;
+        commonShaderSource += hb_gpu_shader_source(HB_GPU_SHADER_STAGE_VERTEX, HB_GPU_SHADER_LANG_WGSL);
+        commonShaderSource += "\n";
+        commonShaderSource += hb_gpu_draw_shader_source(HB_GPU_SHADER_STAGE_VERTEX, HB_GPU_SHADER_LANG_WGSL);
+        commonShaderSource += "\n";
+        commonShaderSource += hb_gpu_shader_source(HB_GPU_SHADER_STAGE_FRAGMENT, HB_GPU_SHADER_LANG_WGSL);
+        commonShaderSource += "\n";
+        commonShaderSource += hb_gpu_draw_shader_source(HB_GPU_SHADER_STAGE_FRAGMENT, HB_GPU_SHADER_LANG_WGSL);
+        commonShaderSource += "\n";
+        commonShaderSource += R"(
 struct Uniforms {
   mvp: mat4x4f,
   viewport: vec2f,
@@ -1018,7 +1414,31 @@ struct VertexOutput {
   out.color = in.color;
   return out;
 }
+)";
 
+        std::string drawShaderSource = commonShaderSource + R"(
+@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+  let ppem = hb_gpu_ppem(in.texcoord, in.glyphLoc, &hb_gpu_atlas);
+  let cov = hb_gpu_draw(in.texcoord, in.glyphLoc, &hb_gpu_atlas);
+  var c = vec4f(in.color.rgb * in.color.a * cov, in.color.a * cov);
+
+  if (cov > 0.0 && cov < 1.0) {
+    var adjusted = cov;
+    if (u.stem_darkening > 0.0) {
+      let brightness = select(0.0, dot(c.rgb, vec3f(1.0 / 3.0)) / c.a, c.a > 0.0);
+      adjusted = hb_gpu_stem_darken(adjusted, brightness, ppem);
+    }
+    c = c * (adjusted / cov);
+  }
+
+  return c;
+}
+)";
+
+        std::string paintShaderSource = commonShaderSource;
+        paintShaderSource += hb_gpu_paint_shader_source(HB_GPU_SHADER_STAGE_FRAGMENT, HB_GPU_SHADER_LANG_WGSL);
+        paintShaderSource += "\n";
+        paintShaderSource += R"(
 @fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
   let ppem = hb_gpu_ppem(in.texcoord, in.glyphLoc, &hb_gpu_atlas);
   var cov: f32;
@@ -1037,7 +1457,8 @@ struct VertexOutput {
 }
 )";
 
-        wgpu::ShaderModule shader = createShaderModule(device, shaderSource);
+        wgpu::ShaderModule drawShader = createShaderModule(device, drawShaderSource);
+        wgpu::ShaderModule paintShader = createShaderModule(device, paintShaderSource);
 
         wgpu::VertexAttribute attributes[6];
         attributes[0].format = wgpu::VertexFormat::Float32x2;
@@ -1078,6 +1499,167 @@ struct VertexOutput {
         colorTarget.writeMask = wgpu::ColorWriteMask::All;
 
         wgpu::FragmentState fragment;
+        fragment.entryPoint = "fs_main";
+        fragment.targetCount = 1;
+        fragment.targets = &colorTarget;
+
+        wgpu::RenderPipelineDescriptor pipelineDescriptor;
+        pipelineDescriptor.layout = pipelineLayout;
+        pipelineDescriptor.vertex.entryPoint = "vs_main";
+        pipelineDescriptor.vertex.bufferCount = 1;
+        pipelineDescriptor.vertex.buffers = &vertexBufferLayout;
+        pipelineDescriptor.primitive.topology = wgpu::PrimitiveTopology::TriangleList;
+        pipelineDescriptor.primitive.cullMode = wgpu::CullMode::None;
+        pipelineDescriptor.fragment = &fragment;
+
+        pipelineDescriptor.vertex.module = drawShader;
+        fragment.module = drawShader;
+        textPipeline = device.CreateRenderPipeline(&pipelineDescriptor);
+
+        pipelineDescriptor.vertex.module = paintShader;
+        fragment.module = paintShader;
+        paintTextPipeline = device.CreateRenderPipeline(&pipelineDescriptor);
+        return textPipeline && paintTextPipeline && textBindGroup;
+	#endif
+    }
+
+    bool ensureImageGlyphPipeline(wgpu::TextureFormat format)
+    {
+#if !LUTE_UI_USE_HARFBUZZ_GPU
+        (void)format;
+        return true;
+#else
+        if (!imageAtlasTexture)
+        {
+            wgpu::TextureDescriptor textureDescriptor;
+            textureDescriptor.size = {kImageAtlasSize, kImageAtlasSize, 1};
+            textureDescriptor.format = wgpu::TextureFormat::RGBA8UnormSrgb;
+            textureDescriptor.usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst;
+            imageAtlasTexture = device.CreateTexture(&textureDescriptor);
+            if (!imageAtlasTexture)
+                return false;
+
+            imageAtlasTextureView = imageAtlasTexture.CreateView();
+
+            wgpu::SamplerDescriptor samplerDescriptor;
+            samplerDescriptor.addressModeU = wgpu::AddressMode::ClampToEdge;
+            samplerDescriptor.addressModeV = wgpu::AddressMode::ClampToEdge;
+            samplerDescriptor.addressModeW = wgpu::AddressMode::ClampToEdge;
+            samplerDescriptor.magFilter = wgpu::FilterMode::Linear;
+            samplerDescriptor.minFilter = wgpu::FilterMode::Linear;
+            imageAtlasSampler = device.CreateSampler(&samplerDescriptor);
+
+            imageGlyphCache.clear();
+            imageAtlasCursorX = 0;
+            imageAtlasCursorY = 0;
+            imageAtlasRowHeight = 0;
+        }
+
+        if (!imageGlyphBindGroup)
+        {
+            wgpu::BindGroupLayoutEntry entries[2];
+            entries[0].binding = 0;
+            entries[0].visibility = wgpu::ShaderStage::Fragment;
+            entries[0].texture.sampleType = wgpu::TextureSampleType::Float;
+            entries[0].texture.viewDimension = wgpu::TextureViewDimension::e2D;
+            entries[0].texture.multisampled = false;
+            entries[1].binding = 1;
+            entries[1].visibility = wgpu::ShaderStage::Fragment;
+            entries[1].sampler.type = wgpu::SamplerBindingType::Filtering;
+
+            wgpu::BindGroupLayoutDescriptor bindGroupLayoutDescriptor;
+            bindGroupLayoutDescriptor.entryCount = 2;
+            bindGroupLayoutDescriptor.entries = entries;
+            imageGlyphBindGroupLayout = device.CreateBindGroupLayout(&bindGroupLayoutDescriptor);
+
+            wgpu::BindGroupEntry bindGroupEntries[2];
+            bindGroupEntries[0].binding = 0;
+            bindGroupEntries[0].textureView = imageAtlasTextureView;
+            bindGroupEntries[1].binding = 1;
+            bindGroupEntries[1].sampler = imageAtlasSampler;
+
+            wgpu::BindGroupDescriptor bindGroupDescriptor;
+            bindGroupDescriptor.layout = imageGlyphBindGroupLayout;
+            bindGroupDescriptor.entryCount = 2;
+            bindGroupDescriptor.entries = bindGroupEntries;
+            imageGlyphBindGroup = device.CreateBindGroup(&bindGroupDescriptor);
+        }
+
+        if (imageGlyphPipeline && imageGlyphBindGroup)
+            return true;
+
+        wgpu::BindGroupLayout layouts[2] = {surfaceBindGroupLayout, imageGlyphBindGroupLayout};
+        wgpu::PipelineLayoutDescriptor pipelineLayoutDescriptor;
+        pipelineLayoutDescriptor.bindGroupLayoutCount = 2;
+        pipelineLayoutDescriptor.bindGroupLayouts = layouts;
+        wgpu::PipelineLayout pipelineLayout = device.CreatePipelineLayout(&pipelineLayoutDescriptor);
+
+        std::string shaderSource = R"(
+struct Uniforms {
+  viewport: vec2f,
+};
+
+@group(0) @binding(0) var<uniform> u: Uniforms;
+@group(1) @binding(0) var image_atlas: texture_2d<f32>;
+@group(1) @binding(1) var image_sampler: sampler;
+
+struct VertexInput {
+  @location(0) position: vec2f,
+  @location(1) texcoord: vec2f,
+};
+
+struct VertexOutput {
+  @builtin(position) clip_position: vec4f,
+  @location(0) texcoord: vec2f,
+};
+
+fn clip_from_pixel(position: vec2f) -> vec4f {
+  let x = position.x / u.viewport.x * 2.0 - 1.0;
+  let y = 1.0 - position.y / u.viewport.y * 2.0;
+  return vec4f(x, y, 0.0, 1.0);
+}
+
+@vertex fn vs_main(in: VertexInput) -> VertexOutput {
+  var out: VertexOutput;
+  out.clip_position = clip_from_pixel(in.position);
+  out.texcoord = in.texcoord;
+  return out;
+}
+
+@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+  return textureSample(image_atlas, image_sampler, in.texcoord);
+}
+)";
+
+        wgpu::ShaderModule shader = createShaderModule(device, shaderSource);
+
+        wgpu::VertexAttribute attributes[2];
+        attributes[0].format = wgpu::VertexFormat::Float32x2;
+        attributes[0].offset = offsetof(ImageGlyphVertex, position);
+        attributes[0].shaderLocation = 0;
+        attributes[1].format = wgpu::VertexFormat::Float32x2;
+        attributes[1].offset = offsetof(ImageGlyphVertex, texcoord);
+        attributes[1].shaderLocation = 1;
+
+        wgpu::VertexBufferLayout vertexBufferLayout;
+        vertexBufferLayout.arrayStride = sizeof(ImageGlyphVertex);
+        vertexBufferLayout.attributeCount = 2;
+        vertexBufferLayout.attributes = attributes;
+
+        wgpu::BlendState blend;
+        blend.color.srcFactor = wgpu::BlendFactor::One;
+        blend.color.dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha;
+        blend.color.operation = wgpu::BlendOperation::Add;
+        blend.alpha.srcFactor = wgpu::BlendFactor::One;
+        blend.alpha.dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha;
+        blend.alpha.operation = wgpu::BlendOperation::Add;
+
+        wgpu::ColorTargetState colorTarget;
+        colorTarget.format = format;
+        colorTarget.blend = &blend;
+        colorTarget.writeMask = wgpu::ColorWriteMask::All;
+
+        wgpu::FragmentState fragment;
         fragment.module = shader;
         fragment.entryPoint = "fs_main";
         fragment.targetCount = 1;
@@ -1093,8 +1675,8 @@ struct VertexOutput {
         pipelineDescriptor.primitive.cullMode = wgpu::CullMode::None;
         pipelineDescriptor.fragment = &fragment;
 
-        textPipeline = device.CreateRenderPipeline(&pipelineDescriptor);
-        return textPipeline && textBindGroup;
+        imageGlyphPipeline = device.CreateRenderPipeline(&pipelineDescriptor);
+        return imageGlyphPipeline && imageGlyphBindGroup;
 #endif
     }
 
@@ -1115,26 +1697,41 @@ struct VertexOutput {
     wgpu::TextureFormat pipelineFormat = wgpu::TextureFormat::Undefined;
     wgpu::RenderPipeline solidPipeline;
     wgpu::RenderPipeline textPipeline;
+    wgpu::RenderPipeline paintTextPipeline;
+    wgpu::RenderPipeline imageGlyphPipeline;
     wgpu::BindGroupLayout surfaceBindGroupLayout;
     wgpu::BindGroupLayout textBindGroupLayout;
+    wgpu::BindGroupLayout imageGlyphBindGroupLayout;
     wgpu::BindGroup surfaceBindGroup;
     wgpu::BindGroup textBindGroup;
+    wgpu::BindGroup imageGlyphBindGroup;
     wgpu::Buffer surfaceUniformBuffer;
     wgpu::Buffer textUniformBuffer;
     wgpu::Buffer solidVertexBuffer;
     wgpu::Buffer glyphVertexBuffer;
+    wgpu::Buffer paintGlyphVertexBuffer;
+    wgpu::Buffer imageGlyphVertexBuffer;
     wgpu::Buffer atlasBuffer;
+    wgpu::Texture imageAtlasTexture;
+    wgpu::TextureView imageAtlasTextureView;
+    wgpu::Sampler imageAtlasSampler;
     uint64_t solidVertexCapacity = 0;
     uint64_t glyphVertexCapacity = 0;
+    uint64_t paintGlyphVertexCapacity = 0;
+    uint64_t imageGlyphVertexCapacity = 0;
 
     std::vector<int32_t> atlasShadow;
     uint64_t atlasCursor = 0;
     bool atlasDirty = false;
+    uint32_t imageAtlasCursorX = 0;
+    uint32_t imageAtlasCursorY = 0;
+    uint32_t imageAtlasRowHeight = 0;
 
 #if LUTE_UI_USE_HARFBUZZ_GPU
+    hb_gpu_draw_t* draw = nullptr;
     hb_gpu_paint_t* paint = nullptr;
-    const FontFace* activeFontFace = nullptr;
-    std::unordered_map<hb_codepoint_t, EncodedGlyph> glyphCache;
+    std::unordered_map<GlyphCacheKey, EncodedGlyph, GlyphCacheKeyHash> glyphCache;
+    std::unordered_map<GlyphCacheKey, ImageGlyph, GlyphCacheKeyHash> imageGlyphCache;
 #endif
 };
 

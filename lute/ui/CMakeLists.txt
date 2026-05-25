@@ -34,7 +34,7 @@ if(APPLE)
         src/ui/platform/macos/NativeShell.mm
     )
     set_source_files_properties(src/ui/platform/macos/NativeShell.mm PROPERTIES LANGUAGE OBJCXX)
-    target_link_libraries(Lute.UI PUBLIC "-framework AppKit" "-framework QuartzCore" "-framework CoreText")
+    target_link_libraries(Lute.UI PUBLIC "-framework AppKit" "-framework QuartzCore" "-framework CoreText" "-framework CoreGraphics" "-framework ImageIO")
 endif()
 
 target_compile_features(Lute.UI PUBLIC cxx_std_17 PRIVATE cxx_std_20)

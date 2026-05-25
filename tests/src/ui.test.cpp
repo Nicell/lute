@@ -1,5 +1,7 @@
 #include "lute/ui/Context.h"
+#include "lute/ui/Text.h"
 
+#include <algorithm>
 #include <string>
 
 #include "cliruntimefixture.h"
@@ -82,6 +84,42 @@ TEST_CASE("ui_column_layout_and_button_activation")
     click.position = {30.0f, 70.0f};
     CHECK(context.dispatchPointer(click));
     CHECK(activations == 1);
+}
+
+TEST_CASE("ui_text_shapes_emoji_with_coretext_fallback")
+{
+    TextShaper shaper;
+    GlyphRun run = shaper.shapeSingleRun(std::string("Hi ") + "\xf0\x9f\x99\x82");
+
+    CHECK(run.advance > 0.0f);
+    CHECK(std::any_of(
+        run.glyphs.begin(),
+        run.glyphs.end(),
+        [](const ShapedGlyph& glyph)
+        {
+            return glyph.id != 0 && glyph.fontFace && glyph.fontFace->postScriptName().find("AppleColorEmoji") != std::string::npos;
+        }
+    ));
+
+#if defined(__APPLE__)
+    GlyphRun counter = shaper.shapeSingleRun(std::string("\xf0\x9f\xa7\xae") + " Count: 0");
+    auto emojiGlyph = std::find_if(
+        counter.glyphs.begin(),
+        counter.glyphs.end(),
+        [](const ShapedGlyph& glyph)
+        {
+            return glyph.id != 0 && glyph.fontFace && glyph.fontFace->postScriptName().find("AppleColorEmoji") != std::string::npos;
+        }
+    );
+
+    REQUIRE(emojiGlyph != counter.glyphs.end());
+    CHECK(emojiGlyph->xAdvance > 18.0f);
+    GlyphMetrics emojiMetrics = emojiGlyph->fontFace->glyphMetrics(emojiGlyph->id);
+    CHECK(emojiMetrics.available);
+    CHECK(emojiMetrics.width > 16.0f);
+    CHECK(emojiMetrics.yBearing + emojiMetrics.height < 0.0f);
+    CHECK(counter.advance > 75.0f);
+#endif
 }
 
 TEST_CASE("ui_scene_and_semantics_are_retained_outputs")
