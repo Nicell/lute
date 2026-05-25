@@ -25,6 +25,8 @@ struct UiNode
     float gap = 0.0f;
     EdgeInsets padding;
     bool focusable = false;
+    bool focused = false;
+    bool focusVisible = false;
     bool disabled = false;
     bool pressed = false;
     void* widgetState = nullptr;
@@ -53,6 +55,7 @@ public:
     void setGap(NodeId id, float gap);
     void setPadding(NodeId id, EdgeInsets padding);
     void setDisabled(NodeId id, bool disabled);
+    void setFocused(NodeId id, bool focused, bool focusVisible);
     void setOnActivate(NodeId id, std::function<void()> callback);
 
     std::string dump(NodeId root) const;

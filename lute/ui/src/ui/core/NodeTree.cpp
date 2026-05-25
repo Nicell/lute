@@ -24,6 +24,10 @@ static void dumpNode(const NodeTree& tree, NodeId id, int depth, std::ostringstr
         out << " gap=" << node->gap;
     if (node->padding.horizontal() != 0.0f || node->padding.vertical() != 0.0f)
         out << " padding=(" << node->padding.top << "," << node->padding.right << "," << node->padding.bottom << "," << node->padding.left << ")";
+    if (node->focused)
+        out << " focused";
+    if (node->focusVisible)
+        out << " focus-visible";
     out << " dirty=" << dirtyBitsToString(node->dirty) << "\n";
 
     for (NodeId child : node->children)
@@ -233,6 +237,23 @@ void NodeTree::setDisabled(NodeId id, bool disabled)
         return;
 
     node->disabled = disabled;
+    markDirty(id, DirtyBits::State | DirtyBits::Paint | DirtyBits::Scene | DirtyBits::Semantics);
+}
+
+void NodeTree::setFocused(NodeId id, bool focused, bool focusVisible)
+{
+    UiNode* node = get(id);
+    if (!node)
+        return;
+
+    if (!focused)
+        focusVisible = false;
+
+    if (node->focused == focused && node->focusVisible == focusVisible)
+        return;
+
+    node->focused = focused;
+    node->focusVisible = focusVisible;
     markDirty(id, DirtyBits::State | DirtyBits::Paint | DirtyBits::Scene | DirtyBits::Semantics);
 }
 

@@ -35,7 +35,11 @@ public:
     void retainEffect(std::shared_ptr<Effect> effect);
 
     bool activate(NodeId id);
-    bool dispatchPointer(const PointerEvent& event);
+    bool focus(NodeId id);
+    bool clearFocus();
+    std::optional<NodeId> focusedNode() const;
+    bool dispatchPointer(const PointerEvent& event, NodeId root = kInvalidNodeId);
+    bool dispatchKey(const KeyEvent& event, NodeId root = kInvalidNodeId);
 
     const Scene& currentScene() const;
     const SemanticTree& currentSemantics() const;
@@ -50,6 +54,9 @@ public:
 
 private:
     NodeId resolveRoot(NodeId requested) const;
+    bool setFocusedNode(NodeId id, bool focusVisible);
+    bool focusNext(NodeId root, bool reverse);
+    void clearInvalidFocus(NodeId root);
 
     ReactiveGraph graph;
     NodeTree tree;
@@ -62,6 +69,7 @@ private:
     Scene scene;
     SemanticTree semantics;
     NodeId rootNode = kInvalidNodeId;
+    NodeId focusedNodeId = kInvalidNodeId;
     Vec2 viewportSize = {800.0f, 600.0f};
     std::optional<std::string> lastError;
     std::vector<std::shared_ptr<Effect>> retainedEffects;

@@ -17,6 +17,13 @@ export type Padding = number | {
 	left: number?,
 }
 
+export type KeyModifiers = {
+	shift: boolean?,
+	control: boolean?,
+	alt: boolean?,
+	meta: boolean?,
+}
+
 export type WindowProps = {
 	title: string?,
 	gap: number?,
@@ -80,7 +87,19 @@ function ui.activate(element: Element): boolean
 	error("not implemented")
 end
 
+function ui.focus(element: Element): boolean
+	error("not implemented")
+end
+
+function ui.focused(root: Element?): number?
+	error("not implemented")
+end
+
 function ui.click(root: Element, x: number, y: number): boolean
+	error("not implemented")
+end
+
+function ui.press_key(root: Element, key: string, modifiers: KeyModifiers?): boolean
 	error("not implemented")
 end
 

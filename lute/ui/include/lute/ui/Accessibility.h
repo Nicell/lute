@@ -39,6 +39,7 @@ struct SemanticNode
     Rect bounds;
 
     bool focusable = false;
+    bool focused = false;
     bool disabled = false;
     std::vector<SemanticAction> actions;
 };

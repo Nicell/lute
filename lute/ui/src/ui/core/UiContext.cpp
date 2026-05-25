@@ -1,7 +1,51 @@
 #include "lute/ui/Context.h"
 
+#include <algorithm>
+#include <vector>
+
 namespace lute::ui
 {
+
+namespace
+{
+
+bool isFocusableNode(const UiNode* node)
+{
+    return node && node->focusable && !node->disabled;
+}
+
+bool containsNode(const NodeTree& tree, NodeId root, NodeId target)
+{
+    const UiNode* node = tree.get(root);
+    if (!node)
+        return false;
+
+    if (root == target)
+        return true;
+
+    for (NodeId child : node->children)
+    {
+        if (containsNode(tree, child, target))
+            return true;
+    }
+
+    return false;
+}
+
+void collectFocusableNodes(const NodeTree& tree, NodeId root, std::vector<NodeId>& out)
+{
+    const UiNode* node = tree.get(root);
+    if (!node)
+        return;
+
+    if (isFocusableNode(node))
+        out.push_back(root);
+
+    for (NodeId child : node->children)
+        collectFocusableNodes(tree, child, out);
+}
+
+} // namespace
 
 ReactiveGraph& UiContext::reactive()
 {
@@ -91,14 +135,89 @@ bool UiContext::activate(NodeId id)
     return inputRouter.dispatchCommand(tree, id, Command::Activate);
 }
 
-bool UiContext::dispatchPointer(const PointerEvent& event)
+bool UiContext::focus(NodeId id)
 {
     flush();
-    NodeId id = resolveRoot(kInvalidNodeId);
+    NodeId root = resolveRoot(kInvalidNodeId);
+    if (id == kInvalidNodeId || root == kInvalidNodeId || !containsNode(tree, root, id) || !isFocusableNode(tree.get(id)))
+        return false;
+
+    setFocusedNode(id, true);
+    return true;
+}
+
+bool UiContext::clearFocus()
+{
+    return setFocusedNode(kInvalidNodeId, false);
+}
+
+std::optional<NodeId> UiContext::focusedNode() const
+{
+    if (focusedNodeId == kInvalidNodeId)
+        return std::nullopt;
+
+    NodeId root = resolveRoot(kInvalidNodeId);
+    if (root == kInvalidNodeId || !containsNode(tree, root, focusedNodeId) || !isFocusableNode(tree.get(focusedNodeId)))
+        return std::nullopt;
+
+    return focusedNodeId;
+}
+
+bool UiContext::dispatchPointer(const PointerEvent& event, NodeId root)
+{
+    flush();
+    NodeId id = resolveRoot(root);
     if (id == kInvalidNodeId)
         return false;
 
-    return inputRouter.dispatchPointer(tree, id, event);
+    clearInvalidFocus(id);
+
+    bool focusChanged = false;
+    if (event.kind == PointerEventKind::Down || event.kind == PointerEventKind::Up)
+    {
+        std::optional<NodeId> target = inputRouter.hitTest(tree, id, event.position);
+        if (target && isFocusableNode(tree.get(*target)))
+            focusChanged = setFocusedNode(*target, false);
+        else if (event.kind == PointerEventKind::Down)
+            focusChanged = clearFocus();
+    }
+
+    bool handled = inputRouter.dispatchPointer(tree, id, event);
+    return handled || focusChanged;
+}
+
+bool UiContext::dispatchKey(const KeyEvent& event, NodeId root)
+{
+    flush();
+    NodeId id = resolveRoot(root);
+    if (id == kInvalidNodeId)
+        return false;
+
+    clearInvalidFocus(id);
+
+    if (event.kind == KeyEventKind::Down && event.logical == LogicalKey::Tab)
+        return focusNext(id, event.modifiers.shift);
+
+    if (focusedNodeId == kInvalidNodeId || !isFocusableNode(tree.get(focusedNodeId)))
+        return false;
+
+    if (event.logical == LogicalKey::Enter)
+    {
+        if (event.kind != KeyEventKind::Down || event.repeat)
+            return event.kind == KeyEventKind::Down;
+
+        return inputRouter.dispatchCommand(tree, focusedNodeId, Command::Activate);
+    }
+
+    if (event.logical == LogicalKey::Space)
+    {
+        if (event.kind == KeyEventKind::Down)
+            return true;
+
+        return inputRouter.dispatchCommand(tree, focusedNodeId, Command::Activate);
+    }
+
+    return false;
 }
 
 const Scene& UiContext::currentScene() const
@@ -162,6 +281,68 @@ NodeId UiContext::resolveRoot(NodeId requested) const
         return requested;
 
     return rootNode;
+}
+
+bool UiContext::setFocusedNode(NodeId id, bool focusVisible)
+{
+    if (focusedNodeId == id)
+    {
+        const UiNode* node = tree.get(id);
+        bool changed = node && (node->focused != (id != kInvalidNodeId) || node->focusVisible != focusVisible);
+        if (id != kInvalidNodeId)
+            tree.setFocused(id, true, focusVisible);
+        return changed;
+    }
+
+    NodeId previous = focusedNodeId;
+    focusedNodeId = id;
+
+    if (previous != kInvalidNodeId)
+        tree.setFocused(previous, false, false);
+    if (focusedNodeId != kInvalidNodeId)
+        tree.setFocused(focusedNodeId, true, focusVisible);
+
+    return true;
+}
+
+bool UiContext::focusNext(NodeId root, bool reverse)
+{
+    std::vector<NodeId> focusable;
+    collectFocusableNodes(tree, root, focusable);
+
+    if (focusable.empty())
+    {
+        clearFocus();
+        return false;
+    }
+
+    auto found = std::find(focusable.begin(), focusable.end(), focusedNodeId);
+    std::size_t nextIndex = 0;
+
+    if (found == focusable.end())
+    {
+        nextIndex = reverse ? focusable.size() - 1 : 0;
+    }
+    else if (reverse)
+    {
+        nextIndex = found == focusable.begin() ? focusable.size() - 1 : static_cast<std::size_t>((found - focusable.begin()) - 1);
+    }
+    else
+    {
+        nextIndex = static_cast<std::size_t>((found - focusable.begin() + 1) % focusable.size());
+    }
+
+    setFocusedNode(focusable[nextIndex], true);
+    return true;
+}
+
+void UiContext::clearInvalidFocus(NodeId root)
+{
+    if (focusedNodeId == kInvalidNodeId)
+        return;
+
+    if (!containsNode(tree, root, focusedNodeId) || !isFocusableNode(tree.get(focusedNodeId)))
+        clearFocus();
 }
 
 } // namespace lute::ui

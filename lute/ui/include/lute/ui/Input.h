@@ -22,6 +22,31 @@ enum class PointerButton
     Middle,
 };
 
+enum class KeyEventKind
+{
+    Down,
+    Up,
+};
+
+enum class PhysicalKey
+{
+    Unknown,
+    Tab,
+    Enter,
+    NumpadEnter,
+    Space,
+    Escape,
+};
+
+enum class LogicalKey
+{
+    Unknown,
+    Tab,
+    Enter,
+    Space,
+    Escape,
+};
+
 struct Modifiers
 {
     bool shift = false;
@@ -36,6 +61,15 @@ struct PointerEvent
     Vec2 position;
     PointerButton button = PointerButton::Primary;
     Modifiers modifiers;
+};
+
+struct KeyEvent
+{
+    KeyEventKind kind = KeyEventKind::Down;
+    PhysicalKey physical = PhysicalKey::Unknown;
+    LogicalKey logical = LogicalKey::Unknown;
+    Modifiers modifiers;
+    bool repeat = false;
 };
 
 enum class Command

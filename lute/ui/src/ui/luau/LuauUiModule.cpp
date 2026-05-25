@@ -7,6 +7,7 @@
 #include "lua.h"
 #include "lualib.h"
 
+#include <cctype>
 #include <cstring>
 #include <memory>
 #include <sstream>
@@ -150,6 +151,68 @@ static EdgeInsets readPadding(lua_State* L, int index)
     padding.bottom = readField("bottom");
     padding.left = readField("left");
     return padding;
+}
+
+static LogicalKey readLogicalKey(lua_State* L, int index)
+{
+    size_t length = 0;
+    const char* value = luaL_checklstring(L, index, &length);
+    std::string key(value, length);
+    for (char& ch : key)
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+
+    if (key == "tab")
+        return LogicalKey::Tab;
+    if (key == "enter" || key == "return")
+        return LogicalKey::Enter;
+    if (key == "space" || key == " ")
+        return LogicalKey::Space;
+    if (key == "escape" || key == "esc")
+        return LogicalKey::Escape;
+
+    luaL_errorL(L, "unsupported ui key '%s'", key.c_str());
+    return LogicalKey::Unknown;
+}
+
+static PhysicalKey physicalKeyForLogical(LogicalKey key)
+{
+    switch (key)
+    {
+    case LogicalKey::Tab:
+        return PhysicalKey::Tab;
+    case LogicalKey::Enter:
+        return PhysicalKey::Enter;
+    case LogicalKey::Space:
+        return PhysicalKey::Space;
+    case LogicalKey::Escape:
+        return PhysicalKey::Escape;
+    case LogicalKey::Unknown:
+        return PhysicalKey::Unknown;
+    }
+
+    return PhysicalKey::Unknown;
+}
+
+static Modifiers readModifiers(lua_State* L, int index)
+{
+    Modifiers modifiers;
+    if (lua_isnoneornil(L, index))
+        return modifiers;
+
+    luaL_checktype(L, index, LUA_TTABLE);
+    auto readBooleanField = [&](const char* name) -> bool
+    {
+        lua_getfield(L, index, name);
+        bool value = lua_toboolean(L, -1) != 0;
+        lua_pop(L, 1);
+        return value;
+    };
+
+    modifiers.shift = readBooleanField("shift");
+    modifiers.control = readBooleanField("control");
+    modifiers.alt = readBooleanField("alt");
+    modifiers.meta = readBooleanField("meta");
+    return modifiers;
 }
 
 static void pushElement(lua_State* L, std::shared_ptr<UiContext> context, NodeId id)
@@ -481,13 +544,66 @@ static int ui_activate(lua_State* L)
     return 1;
 }
 
+static int ui_focus(lua_State* L)
+{
+    LuaElement* element = checkElement(L, 1);
+    bool handled = element->context->focus(element->id);
+    lua_pushboolean(L, handled);
+    return 1;
+}
+
+static int ui_focused(lua_State* L)
+{
+    LuaUiState* state = closureState(L);
+    NodeId id = kInvalidNodeId;
+    std::shared_ptr<UiContext> context = contextFromOptionalElement(L, state, 1, &id);
+    (void)id;
+
+    std::optional<NodeId> focused = context->focusedNode();
+    if (!focused)
+    {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_pushinteger(L, static_cast<int>(*focused));
+    return 1;
+}
+
 static int ui_click(lua_State* L)
 {
     LuaElement* root = checkElement(L, 1);
     PointerEvent event;
-    event.kind = PointerEventKind::Up;
+    event.button = PointerButton::Primary;
     event.position = {static_cast<float>(luaL_checknumber(L, 2)), static_cast<float>(luaL_checknumber(L, 3))};
-    bool handled = root->context->dispatchPointer(event);
+
+    event.kind = PointerEventKind::Down;
+    bool handled = root->context->dispatchPointer(event, root->id);
+    event.kind = PointerEventKind::Up;
+    handled = root->context->dispatchPointer(event, root->id) || handled;
+    if (std::optional<std::string> error = root->context->takeLastError())
+        luaL_errorL(L, "%s", error->c_str());
+
+    lua_pushboolean(L, handled);
+    return 1;
+}
+
+static int ui_press_key(lua_State* L)
+{
+    LuaElement* root = checkElement(L, 1);
+    LogicalKey logical = readLogicalKey(L, 2);
+    Modifiers modifiers = readModifiers(L, 3);
+
+    KeyEvent event;
+    event.physical = physicalKeyForLogical(logical);
+    event.logical = logical;
+    event.modifiers = modifiers;
+
+    event.kind = KeyEventKind::Down;
+    bool handled = root->context->dispatchKey(event, root->id);
+    event.kind = KeyEventKind::Up;
+    handled = root->context->dispatchKey(event, root->id) || handled;
+
     if (std::optional<std::string> error = root->context->takeLastError())
         luaL_errorL(L, "%s", error->c_str());
 
@@ -592,7 +708,10 @@ const luaL_Reg UI::lib[] = {
     {"render", lute::ui::ui_render},
     {"run", lute::ui::ui_run},
     {"activate", lute::ui::ui_activate},
+    {"focus", lute::ui::ui_focus},
+    {"focused", lute::ui::ui_focused},
     {"click", lute::ui::ui_click},
+    {"press_key", lute::ui::ui_press_key},
     {"dump_ui_tree", lute::ui::ui_dump_ui_tree},
     {"dump_layout_tree", lute::ui::ui_dump_layout_tree},
     {"dump_scene", lute::ui::ui_dump_scene},
@@ -604,7 +723,7 @@ int UI::pushLibrary(lua_State* L)
 {
     registerUiMetatables(L);
 
-    lua_createtable(L, 0, 16);
+    lua_createtable(L, 0, 19);
     int tableIndex = lua_gettop(L);
 
     void* storage = lua_newuserdatataggedwithmetatable(L, sizeof(lute::ui::LuaUiState), kUiContextTag);

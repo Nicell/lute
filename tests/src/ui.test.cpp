@@ -130,6 +130,73 @@ TEST_CASE("ui_column_layout_and_button_activation")
     click.position = {30.0f, 70.0f};
     CHECK(context.dispatchPointer(click));
     CHECK(activations == 1);
+    REQUIRE(context.focusedNode());
+    CHECK(*context.focusedNode() == button);
+}
+
+TEST_CASE("ui_focus_traversal_and_keyboard_activation")
+{
+    UiContext context;
+    NodeId window = context.createNode(WidgetKind::Window);
+    NodeId column = context.createNode(WidgetKind::Column);
+    NodeId first = context.createNode(WidgetKind::Button);
+    NodeId disabled = context.createNode(WidgetKind::Button);
+    NodeId second = context.createNode(WidgetKind::Button);
+
+    context.setRoot(window);
+    context.nodes().appendChild(window, column);
+    context.nodes().appendChild(column, first);
+    context.nodes().appendChild(column, disabled);
+    context.nodes().appendChild(column, second);
+    context.nodes().setText(first, "First");
+    context.nodes().setText(disabled, "Disabled");
+    context.nodes().setText(second, "Second");
+    context.nodes().setDisabled(disabled, true);
+
+    int firstActivations = 0;
+    int secondActivations = 0;
+    context.nodes().setOnActivate(first, [&]() { firstActivations++; });
+    context.nodes().setOnActivate(disabled, []() {});
+    context.nodes().setOnActivate(second, [&]() { secondActivations++; });
+    context.flush();
+
+    KeyEvent tab;
+    tab.kind = KeyEventKind::Down;
+    tab.physical = PhysicalKey::Tab;
+    tab.logical = LogicalKey::Tab;
+    CHECK(context.dispatchKey(tab));
+    REQUIRE(context.focusedNode());
+    CHECK(*context.focusedNode() == first);
+
+    KeyEvent enter;
+    enter.kind = KeyEventKind::Down;
+    enter.physical = PhysicalKey::Enter;
+    enter.logical = LogicalKey::Enter;
+    CHECK(context.dispatchKey(enter));
+    CHECK(firstActivations == 1);
+    CHECK(secondActivations == 0);
+
+    CHECK(context.dispatchKey(tab));
+    REQUIRE(context.focusedNode());
+    CHECK(*context.focusedNode() == second);
+
+    KeyEvent space;
+    space.kind = KeyEventKind::Down;
+    space.physical = PhysicalKey::Space;
+    space.logical = LogicalKey::Space;
+    CHECK(context.dispatchKey(space));
+    CHECK(secondActivations == 0);
+
+    space.kind = KeyEventKind::Up;
+    CHECK(context.dispatchKey(space));
+    CHECK(secondActivations == 1);
+
+    tab.modifiers.shift = true;
+    CHECK(context.dispatchKey(tab));
+    REQUIRE(context.focusedNode());
+    CHECK(*context.focusedNode() == first);
+    context.flush();
+    CHECK(context.currentSemantics().dump().find("focused") != std::string::npos);
 }
 
 TEST_CASE("ui_flush_skips_clean_layout_scene_and_semantics")
@@ -391,4 +458,50 @@ TEST_CASE_FIXTURE(CliRuntimeFixture, "ui_luau_counter_updates_signal_bound_text"
     CHECK(getReporter().getOutputs()[4] == "2");
     CHECK(getReporter().getOutputs()[5] == "Dawn");
     CHECK(getReporter().getOutputs()[6] == "4");
+}
+
+TEST_CASE_FIXTURE(CliRuntimeFixture, "ui_luau_keyboard_focus_activation")
+{
+    runCode(R"(
+        local ui = require("@lute/ui")
+
+        local count = ui.signal(0)
+        local button = ui.button {
+            text = "Increment",
+            onPress = function()
+                count:set(count:get() + 1)
+            end,
+        }
+
+        local root = ui.window {
+            title = "Lute UI",
+
+            ui.column {
+                gap = 12,
+                padding = 24,
+
+                ui.text(function()
+                    return "Count: " .. count:get()
+                end),
+
+                button,
+            },
+        }
+
+        ui.flush(root)
+
+        report(ui.press_key(root, "Tab"))
+        report(ui.focused(root) == button.id)
+        report(ui.press_key(root, "Enter"))
+        ui.flush(root)
+        report(ui.dump_scene(root))
+    )");
+
+    REQUIRE(getReporter().getErrors().empty());
+    REQUIRE(getReporter().getOutputs().size() == 4);
+
+    CHECK(getReporter().getOutputs()[0] == "true");
+    CHECK(getReporter().getOutputs()[1] == "true");
+    CHECK(getReporter().getOutputs()[2] == "true");
+    CHECK(getReporter().getOutputs()[3].find("Count: 1") != std::string::npos);
 }

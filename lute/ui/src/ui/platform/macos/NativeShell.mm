@@ -17,6 +17,80 @@ NSString* nsStringFromStd(const std::string& value)
     return [[NSString alloc] initWithBytes:value.data() length:value.size() encoding:NSUTF8StringEncoding];
 }
 
+lute::ui::Modifiers modifiersFromEvent(NSEvent* event)
+{
+    NSEventModifierFlags flags = [event modifierFlags];
+    lute::ui::Modifiers modifiers;
+    modifiers.shift = (flags & NSEventModifierFlagShift) != 0;
+    modifiers.control = (flags & NSEventModifierFlagControl) != 0;
+    modifiers.alt = (flags & NSEventModifierFlagOption) != 0;
+    modifiers.meta = (flags & NSEventModifierFlagCommand) != 0;
+    return modifiers;
+}
+
+lute::ui::PhysicalKey physicalKeyFromEvent(NSEvent* event)
+{
+    switch ([event keyCode])
+    {
+    case 48:
+        return lute::ui::PhysicalKey::Tab;
+    case 36:
+        return lute::ui::PhysicalKey::Enter;
+    case 76:
+        return lute::ui::PhysicalKey::NumpadEnter;
+    case 49:
+        return lute::ui::PhysicalKey::Space;
+    case 53:
+        return lute::ui::PhysicalKey::Escape;
+    default:
+        return lute::ui::PhysicalKey::Unknown;
+    }
+}
+
+lute::ui::LogicalKey logicalKeyFromPhysical(lute::ui::PhysicalKey physical)
+{
+    switch (physical)
+    {
+    case lute::ui::PhysicalKey::Tab:
+        return lute::ui::LogicalKey::Tab;
+    case lute::ui::PhysicalKey::Enter:
+    case lute::ui::PhysicalKey::NumpadEnter:
+        return lute::ui::LogicalKey::Enter;
+    case lute::ui::PhysicalKey::Space:
+        return lute::ui::LogicalKey::Space;
+    case lute::ui::PhysicalKey::Escape:
+        return lute::ui::LogicalKey::Escape;
+    case lute::ui::PhysicalKey::Unknown:
+        return lute::ui::LogicalKey::Unknown;
+    }
+
+    return lute::ui::LogicalKey::Unknown;
+}
+
+lute::ui::KeyEvent keyEventFromNSEvent(NSEvent* event, lute::ui::KeyEventKind kind)
+{
+    lute::ui::PhysicalKey physical = physicalKeyFromEvent(event);
+    lute::ui::KeyEvent keyEvent;
+    keyEvent.kind = kind;
+    keyEvent.physical = physical;
+    keyEvent.logical = logicalKeyFromPhysical(physical);
+    keyEvent.modifiers = modifiersFromEvent(event);
+    keyEvent.repeat = [event isARepeat];
+    return keyEvent;
+}
+
+lute::ui::PointerEvent pointerEventFromNSEvent(NSEvent* event, NSView* view, lute::ui::PointerEventKind kind)
+{
+    NSPoint point = [view convertPoint:[event locationInWindow] fromView:nil];
+
+    lute::ui::PointerEvent pointerEvent;
+    pointerEvent.kind = kind;
+    pointerEvent.button = lute::ui::PointerButton::Primary;
+    pointerEvent.position = {static_cast<float>(point.x), static_cast<float>(point.y)};
+    pointerEvent.modifiers = modifiersFromEvent(event);
+    return pointerEvent;
+}
+
 } // namespace
 
 @interface LuteUiView : NSView
@@ -74,6 +148,8 @@ NSString* nsStringFromStd(const std::string& value)
 {
     [super viewDidMoveToWindow];
     [self updateDrawableSize];
+    if ([self window])
+        [[self window] makeFirstResponder:self];
     [self setNeedsDisplay:YES];
 }
 
@@ -144,11 +220,7 @@ NSString* nsStringFromStd(const std::string& value)
         return;
     _primaryButtonDown = false;
 
-    NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
-    lute::ui::PointerEvent pointerEvent;
-    pointerEvent.kind = lute::ui::PointerEventKind::Up;
-    pointerEvent.button = lute::ui::PointerButton::Primary;
-    pointerEvent.position = {static_cast<float>(point.x), static_cast<float>(point.y)};
+    lute::ui::PointerEvent pointerEvent = pointerEventFromNSEvent(event, self, lute::ui::PointerEventKind::Up);
 
     if (_context->dispatchPointer(pointerEvent))
         [self renderFrame];
@@ -163,7 +235,48 @@ NSString* nsStringFromStd(const std::string& value)
 
     _primaryButtonDown = true;
     [[self window] makeFirstResponder:self];
-    [self setNeedsDisplay:YES];
+
+    lute::ui::PointerEvent pointerEvent = pointerEventFromNSEvent(event, self, lute::ui::PointerEventKind::Down);
+    if (_context->dispatchPointer(pointerEvent))
+        [self renderFrame];
+    else
+        [self setNeedsDisplay:YES];
+}
+
+- (void)keyDown:(NSEvent*)event
+{
+    if (!_context)
+    {
+        [super keyDown:event];
+        return;
+    }
+
+    lute::ui::KeyEvent keyEvent = keyEventFromNSEvent(event, lute::ui::KeyEventKind::Down);
+    if (_context->dispatchKey(keyEvent))
+    {
+        [self renderFrame];
+        return;
+    }
+
+    [super keyDown:event];
+}
+
+- (void)keyUp:(NSEvent*)event
+{
+    if (!_context)
+    {
+        [super keyUp:event];
+        return;
+    }
+
+    lute::ui::KeyEvent keyEvent = keyEventFromNSEvent(event, lute::ui::KeyEventKind::Up);
+    if (_context->dispatchKey(keyEvent))
+    {
+        [self renderFrame];
+        return;
+    }
+
+    [super keyUp:event];
 }
 
 @end
@@ -226,6 +339,7 @@ bool runNativeShell(std::shared_ptr<UiContext> context, std::string* error)
         [view release];
 
         [window makeKeyAndOrderFront:nil];
+        [window makeFirstResponder:view];
         [app activateIgnoringOtherApps:YES];
         [view renderFrame];
         [app run];

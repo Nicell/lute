@@ -78,6 +78,8 @@ std::string SemanticTree::dump() const
         out << " bounds=(" << node.bounds.x << "," << node.bounds.y << "," << node.bounds.width << "," << node.bounds.height << ")";
         if (node.focusable)
             out << " focusable";
+        if (node.focused)
+            out << " focused";
         if (node.disabled)
             out << " disabled";
         if (!node.actions.empty())
@@ -144,6 +146,7 @@ SemanticNode SemanticsBuilder::makeNode(const UiNode& node, std::optional<Semant
     semantic.role = roleForWidget(node.kind);
     semantic.bounds = node.layout.frame;
     semantic.focusable = node.focusable;
+    semantic.focused = node.focused;
     semantic.disabled = node.disabled;
 
     if (node.kind == WidgetKind::Window)

@@ -13,6 +13,7 @@ namespace
 constexpr Color kWindowBackground = {245, 245, 242, 255};
 constexpr Color kDefaultTextColor = {28, 30, 33, 255};
 constexpr Color kButtonTextColor = {255, 255, 255, 255};
+constexpr Color kFocusRingColor = {10, 132, 255, 115};
 
 Color buttonFillColor(const UiNode& node)
 {
@@ -51,6 +52,15 @@ DisplayItem makeFill(DisplayItemKind kind, NodeId node, Rect rect, float radius,
     item.radius = radius;
     item.fill = {color};
     return item;
+}
+
+Rect inflate(Rect rect, float amount)
+{
+    rect.x -= amount;
+    rect.y -= amount;
+    rect.width += amount * 2.0f;
+    rect.height += amount * 2.0f;
+    return rect;
 }
 
 DisplayItem makeTextRun(NodeId node, Rect rect, Color color, std::string text, Vec2 origin, std::optional<Color> backgroundHint)
@@ -219,6 +229,8 @@ SceneBuilder::LocalEmission SceneBuilder::emitLocal(const UiNode& node, std::opt
         Color buttonFill = buttonFillColor(node);
         EdgeInsets padding = buttonPadding(node);
         std::optional<Color> buttonBackgroundHint = resolveBackgroundHint(buttonFill, backgroundHint);
+        if (node.focusVisible)
+            emission.localItems.push_back(makeFill(DisplayItemKind::RoundedRect, node.id, inflate(node.layout.frame, 3.0f), 9.0f, kFocusRingColor));
         emission.localItems.push_back(makeFill(DisplayItemKind::RoundedRect, node.id, node.layout.frame, 6.0f, buttonFill));
         emission.localItems.push_back(makeTextRun(
             node.id,
