@@ -842,7 +842,7 @@ private:
 
         float fontSize = run.fontSize * scale;
         float penX = item.origin.x * scale;
-        float penY = item.origin.y * scale;
+        float penY = std::floor(item.origin.y * scale);
         auto color = colorToLinearFloat(item.fill.color);
         std::array<float, 4> background = {0.0f, 0.0f, 0.0f, -1.0f};
         if (item.backgroundHint)
