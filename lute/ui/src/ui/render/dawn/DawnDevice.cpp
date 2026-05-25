@@ -85,6 +85,7 @@ struct GlyphVertex
     float emPerPos = 0.0f;
     uint32_t atlasOffset = 0;
     float color[4] = {};
+    float background[4] = {0.0f, 0.0f, 0.0f, -1.0f};
 };
 
 struct ImageGlyphVertex
@@ -287,7 +288,8 @@ static void appendGlyphVertices(
     float fontSize,
     uint32_t upem,
     const EncodedGlyph& glyph,
-    const std::array<float, 4>& color
+    const std::array<float, 4>& color,
+    const std::array<float, 4>& background
 )
 {
     if (glyph.empty || upem == 0 || fontSize <= 0.0f)
@@ -314,6 +316,7 @@ static void appendGlyphVertices(
         vertex.emPerPos = emPerPos;
         vertex.atlasOffset = glyph.atlasOffset;
         std::copy(color.begin(), color.end(), vertex.color);
+        std::copy(background.begin(), background.end(), vertex.background);
         quad[i] = vertex;
     }
 
@@ -841,6 +844,9 @@ private:
         float penX = item.origin.x * scale;
         float penY = item.origin.y * scale;
         auto color = colorToLinearFloat(item.fill.color);
+        std::array<float, 4> background = {0.0f, 0.0f, 0.0f, -1.0f};
+        if (item.backgroundHint)
+            background = colorToLinearFloat(*item.backgroundHint);
 
         for (const ShapedGlyph& shaped : run.glyphs)
         {
@@ -868,7 +874,7 @@ private:
                 if (glyph)
                 {
                     std::vector<GlyphVertex>& target = glyph->renderMode == 1 ? paintVertices : drawVertices;
-                    appendGlyphVertices(target, glyphX, glyphY, fontSize, upem, *glyph, color);
+                    appendGlyphVertices(target, glyphX, glyphY, fontSize, upem, *glyph, color, background);
                 }
             }
 
@@ -1390,6 +1396,7 @@ struct VertexInput {
   @location(3) emPerPos: f32,
   @location(4) glyphLoc: u32,
   @location(5) color: vec4f,
+  @location(6) background: vec4f,
 };
 
 struct VertexOutput {
@@ -1397,7 +1404,61 @@ struct VertexOutput {
   @location(0) texcoord: vec2f,
   @location(1) @interpolate(flat) glyphLoc: u32,
   @location(2) color: vec4f,
+  @location(3) background: vec4f,
 };
+
+fn srgb_to_linear_channel(value: f32) -> f32 {
+  let c = clamp(value, 0.0, 1.0);
+  return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045);
+}
+
+fn linear_to_srgb_channel(value: f32) -> f32 {
+  let c = clamp(value, 0.0, 1.0);
+  return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308);
+}
+
+fn srgb_to_linear(color: vec3f) -> vec3f {
+  return vec3f(
+    srgb_to_linear_channel(color.r),
+    srgb_to_linear_channel(color.g),
+    srgb_to_linear_channel(color.b)
+  );
+}
+
+fn linear_to_srgb(color: vec3f) -> vec3f {
+  return vec3f(
+    linear_to_srgb_channel(color.r),
+    linear_to_srgb_channel(color.g),
+    linear_to_srgb_channel(color.b)
+  );
+}
+
+fn min_premul_alpha_for_color(desired: vec3f, background: vec3f) -> f32 {
+  let lower = (background - desired) / max(background, vec3f(0.00001));
+  let upper = (desired - background) / max(vec3f(1.0) - background, vec3f(0.00001));
+  let required = vec3f(
+    select(lower.r, upper.r, desired.r >= background.r),
+    select(lower.g, upper.g, desired.g >= background.g),
+    select(lower.b, upper.b, desired.b >= background.b)
+  );
+  return clamp(max(max(required.r, required.g), required.b), 0.0, 1.0);
+}
+
+fn srgb_coverage_premul(coverage: f32, color: vec4f, background: vec3f) -> vec4f {
+  let fg = clamp(color.rgb, vec3f(0.0), vec3f(1.0));
+  let bg = clamp(background, vec3f(0.0), vec3f(1.0));
+  let desired = srgb_to_linear(mix(linear_to_srgb(bg), linear_to_srgb(fg), vec3f(clamp(coverage * color.a, 0.0, 1.0))));
+  let alpha = min_premul_alpha_for_color(desired, bg);
+  let premul = desired - bg * (1.0 - alpha);
+  return vec4f(clamp(premul, vec3f(0.0), vec3f(1.0)), alpha);
+}
+
+fn coverage_to_premul(color: vec4f, background: vec4f, coverage: f32) -> vec4f {
+  if (background.a >= 0.0 && color.a > 0.0) {
+    return srgb_coverage_premul(coverage, color, background.rgb);
+  }
+  return vec4f(color.rgb * color.a * coverage, color.a * coverage);
+}
 
 @vertex fn vs_main(in: VertexInput) -> VertexOutput {
   var pos = in.position;
@@ -1412,6 +1473,7 @@ struct VertexOutput {
   out.texcoord = tc;
   out.glyphLoc = in.glyphLoc;
   out.color = in.color;
+  out.background = in.background;
   return out;
 }
 )";
@@ -1420,18 +1482,16 @@ struct VertexOutput {
 @fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
   let ppem = hb_gpu_ppem(in.texcoord, in.glyphLoc, &hb_gpu_atlas);
   let cov = hb_gpu_draw(in.texcoord, in.glyphLoc, &hb_gpu_atlas);
-  var c = vec4f(in.color.rgb * in.color.a * cov, in.color.a * cov);
+  var adjusted = cov;
 
   if (cov > 0.0 && cov < 1.0) {
-    var adjusted = cov;
     if (u.stem_darkening > 0.0) {
-      let brightness = select(0.0, dot(c.rgb, vec3f(1.0 / 3.0)) / c.a, c.a > 0.0);
+      let brightness = dot(in.color.rgb, vec3f(1.0 / 3.0));
       adjusted = hb_gpu_stem_darken(adjusted, brightness, ppem);
     }
-    c = c * (adjusted / cov);
   }
 
-  return c;
+  return coverage_to_premul(in.color, in.background, adjusted);
 }
 )";
 
@@ -1450,7 +1510,13 @@ struct VertexOutput {
       let brightness = select(0.0, dot(c.rgb, vec3f(1.0 / 3.0)) / c.a, c.a > 0.0);
       adjusted = hb_gpu_stem_darken(adjusted, brightness, ppem);
     }
-    c = c * (adjusted / cov);
+    if (in.background.a >= 0.0 && c.a > 0.0) {
+      let straight = c.rgb / c.a;
+      let opacity = clamp(c.a / cov, 0.0, 1.0);
+      c = coverage_to_premul(vec4f(straight, opacity), in.background, adjusted);
+    } else {
+      c = c * (adjusted / cov);
+    }
   }
 
   return c;
@@ -1460,7 +1526,7 @@ struct VertexOutput {
         wgpu::ShaderModule drawShader = createShaderModule(device, drawShaderSource);
         wgpu::ShaderModule paintShader = createShaderModule(device, paintShaderSource);
 
-        wgpu::VertexAttribute attributes[6];
+        wgpu::VertexAttribute attributes[7];
         attributes[0].format = wgpu::VertexFormat::Float32x2;
         attributes[0].offset = offsetof(GlyphVertex, position);
         attributes[0].shaderLocation = 0;
@@ -1479,10 +1545,13 @@ struct VertexOutput {
         attributes[5].format = wgpu::VertexFormat::Float32x4;
         attributes[5].offset = offsetof(GlyphVertex, color);
         attributes[5].shaderLocation = 5;
+        attributes[6].format = wgpu::VertexFormat::Float32x4;
+        attributes[6].offset = offsetof(GlyphVertex, background);
+        attributes[6].shaderLocation = 6;
 
         wgpu::VertexBufferLayout vertexBufferLayout;
         vertexBufferLayout.arrayStride = sizeof(GlyphVertex);
-        vertexBufferLayout.attributeCount = 6;
+        vertexBufferLayout.attributeCount = 7;
         vertexBufferLayout.attributes = attributes;
 
         wgpu::BlendState blend;
