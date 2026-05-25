@@ -19,6 +19,11 @@ Color buttonFillColor(const UiNode& node)
     return {38, 101, 214, node.disabled ? uint8_t(120) : uint8_t(255)};
 }
 
+EdgeInsets buttonPadding(const UiNode& node)
+{
+    return node.padding.horizontal() == 0.0f && node.padding.vertical() == 0.0f ? EdgeInsets{6.0f, 12.0f, 6.0f, 12.0f} : node.padding;
+}
+
 std::optional<Color> resolveBackgroundHint(Color fill, std::optional<Color> backdrop)
 {
     if (fill.a == 255)
@@ -162,17 +167,32 @@ void SceneBuilder::emitNode(const NodeTree& tree, NodeId id, std::vector<Display
     case WidgetKind::Canvas:
         break;
     case WidgetKind::Text:
-        out.push_back(makeTextRun(node->id, node->layout.frame, kDefaultTextColor, node->text, {node->layout.frame.x, node->layout.frame.y + 15.0f}, backgroundHint));
+        out.push_back(makeTextRun(
+            node->id,
+            node->layout.frame,
+            kDefaultTextColor,
+            node->text,
+            {node->layout.frame.x, node->layout.frame.y + node->layout.firstBaseline.value_or(15.0f)},
+            backgroundHint
+        ));
         break;
     case WidgetKind::Button:
     {
         Color buttonFill = buttonFillColor(*node);
+        EdgeInsets padding = buttonPadding(*node);
         std::optional<Color> buttonBackgroundHint = resolveBackgroundHint(buttonFill, backgroundHint);
         out.push_back(
             makeFill(DisplayItemKind::RoundedRect, node->id, node->layout.frame, 6.0f, buttonFill)
         );
         out.push_back(
-            makeTextRun(node->id, node->layout.frame, kButtonTextColor, node->text, {node->layout.frame.x + 12.0f, node->layout.frame.y + 21.0f}, buttonBackgroundHint)
+            makeTextRun(
+                node->id,
+                node->layout.frame,
+                kButtonTextColor,
+                node->text,
+                {node->layout.frame.x + padding.left, node->layout.frame.y + node->layout.firstBaseline.value_or(21.0f)},
+                buttonBackgroundHint
+            )
         );
         childBackgroundHint = buttonBackgroundHint;
         break;

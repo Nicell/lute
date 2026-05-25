@@ -74,7 +74,7 @@ TEST_CASE("ui_column_layout_and_button_activation")
     CHECK(textNode->layout.frame.x == 24.0f);
     CHECK(textNode->layout.frame.y == 24.0f);
     CHECK(buttonNode->layout.frame.x == 24.0f);
-    CHECK(buttonNode->layout.frame.y == 56.0f);
+    CHECK(buttonNode->layout.frame.y == textNode->layout.frame.y + textNode->layout.frame.height + 12.0f);
     CHECK(buttonNode->layout.frame.height == 32.0f);
 
     PointerEvent click;

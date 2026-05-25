@@ -1,4 +1,5 @@
 #include "lute/ui/Render.h"
+#include "lute/ui/Text.h"
 
 #if LUTE_UI_USE_DAWN
 #include <webgpu/webgpu_cpp.h>
@@ -275,9 +276,6 @@ public:
     {
 #if LUTE_UI_USE_HARFBUZZ_GPU
         hb_gpu_paint_destroy(paint);
-        hb_font_destroy(font);
-        hb_face_destroy(face);
-        hb_blob_destroy(blob);
 #endif
     }
 
@@ -615,37 +613,30 @@ private:
         if (item.text.empty() || !ensureFont())
             return;
 
-        int textLength = static_cast<int>(std::min<size_t>(item.text.size(), static_cast<size_t>(std::numeric_limits<int>::max())));
-        hb_buffer_t* buffer = hb_buffer_create();
-        hb_buffer_add_utf8(buffer, item.text.data(), textLength, 0, textLength);
-        hb_buffer_guess_segment_properties(buffer);
-        hb_shape(font, buffer, nullptr, 0);
+        TextShaper shaper;
+        GlyphRun run = shaper.shapeSingleRun(item.text);
+        if (run.glyphs.empty())
+            return;
 
-        unsigned glyphCount = 0;
-        hb_glyph_info_t* infos = hb_buffer_get_glyph_infos(buffer, &glyphCount);
-        hb_glyph_position_t* positions = hb_buffer_get_glyph_positions(buffer, &glyphCount);
-
-        float fontSize = 14.0f * scale;
-        float fontScale = upem > 0 ? fontSize / static_cast<float>(upem) : 1.0f;
+        uint32_t upem = activeFontFace ? activeFontFace->unitsPerEm() : 1000;
+        float fontSize = run.fontSize * scale;
         float penX = item.origin.x * scale;
         float penY = item.origin.y * scale;
         auto color = colorToLinearFloat(item.fill.color);
 
-        for (unsigned i = 0; i < glyphCount; i++)
+        for (const ShapedGlyph& shaped : run.glyphs)
         {
-            const EncodedGlyph* glyph = lookupGlyph(infos[i].codepoint);
+            const EncodedGlyph* glyph = lookupGlyph(shaped.id);
             if (glyph)
             {
-                float glyphX = penX + static_cast<float>(positions[i].x_offset) * fontScale;
-                float glyphY = penY - static_cast<float>(positions[i].y_offset) * fontScale;
+                float glyphX = penX + shaped.xOffset * scale;
+                float glyphY = penY - shaped.yOffset * scale;
                 appendGlyphVertices(vertices, glyphX, glyphY, fontSize, upem, *glyph, color);
             }
 
-            penX += static_cast<float>(positions[i].x_advance) * fontScale;
-            penY -= static_cast<float>(positions[i].y_advance) * fontScale;
+            penX += shaped.xAdvance * scale;
+            penY -= shaped.yAdvance * scale;
         }
-
-        hb_buffer_destroy(buffer);
 #else
         (void)vertices;
         (void)item;
@@ -656,49 +647,30 @@ private:
 #if LUTE_UI_USE_HARFBUZZ_GPU
     bool ensureFont()
     {
-        if (font && paint)
-            return true;
+        const FontFace& fontFace = defaultUiFontFace();
+        if (!fontFace.available() || !fontFace.harfbuzzFont())
+            return false;
 
-        static constexpr const char* fontPaths[] = {
-            "/System/Library/Fonts/SFNS.ttf",
-            "/System/Library/Fonts/SFCompact.ttf",
-            "/System/Library/Fonts/HelveticaNeue.ttc",
-            "/System/Library/Fonts/Geneva.ttf",
-        };
-
-        for (const char* path : fontPaths)
+        if (activeFontFace != &fontFace)
         {
-            hb_blob_t* nextBlob = hb_blob_create_from_file_or_fail(path);
-            if (!nextBlob)
-                continue;
-
-            hb_face_t* nextFace = hb_face_create(nextBlob, 0);
-            if (!nextFace || hb_face_get_glyph_count(nextFace) == 0)
-            {
-                hb_face_destroy(nextFace);
-                hb_blob_destroy(nextBlob);
-                continue;
-            }
-
-            blob = nextBlob;
-            face = nextFace;
-            font = hb_font_create(face);
-            hb_ot_font_set_funcs(font);
-
-            upem = hb_face_get_upem(face);
-            if (upem == 0)
-                upem = 1000;
-
-            hb_font_set_scale(font, static_cast<int>(upem), static_cast<int>(upem));
-            paint = hb_gpu_paint_create_or_fail();
-            if (!paint)
-                return false;
-
-            hb_gpu_paint_set_scale(paint, static_cast<int>(upem), static_cast<int>(upem));
-            return true;
+            glyphCache.clear();
+            atlasCursor = 0;
+            if (!atlasShadow.empty())
+                std::fill(atlasShadow.begin(), atlasShadow.end(), 0);
+            atlasDirty = true;
+            activeFontFace = &fontFace;
         }
 
-        return false;
+        if (paint)
+            return true;
+
+        paint = hb_gpu_paint_create_or_fail();
+        if (!paint)
+            return false;
+
+        uint32_t upem = fontFace.unitsPerEm();
+        hb_gpu_paint_set_scale(paint, static_cast<int>(upem), static_cast<int>(upem));
+        return true;
     }
 
     const EncodedGlyph* lookupGlyph(hb_codepoint_t glyph)
@@ -707,11 +679,11 @@ private:
         if (found != glyphCache.end())
             return &found->second;
 
-        if (!paint || !font)
+        if (!paint || !activeFontFace || !activeFontFace->harfbuzzFont())
             return nullptr;
 
         hb_gpu_paint_clear(paint);
-        hb_gpu_paint_glyph(paint, font, glyph);
+        hb_gpu_paint_glyph(paint, activeFontFace->harfbuzzFont(), glyph);
 
         hb_glyph_extents_t extents = {};
         hb_blob_t* encoded = hb_gpu_paint_encode(paint, &extents);
@@ -1160,11 +1132,8 @@ struct VertexOutput {
     bool atlasDirty = false;
 
 #if LUTE_UI_USE_HARFBUZZ_GPU
-    hb_blob_t* blob = nullptr;
-    hb_face_t* face = nullptr;
-    hb_font_t* font = nullptr;
     hb_gpu_paint_t* paint = nullptr;
-    uint32_t upem = 1000;
+    const FontFace* activeFontFace = nullptr;
     std::unordered_map<hb_codepoint_t, EncodedGlyph> glyphCache;
 #endif
 };
