@@ -263,6 +263,121 @@ static uint32_t findFaceIndex(hb_blob_t* blob, const std::string& postScriptName
 
     return 0;
 }
+
+static uint16_t readU16(const char* data, unsigned int length, unsigned int offset)
+{
+    if (offset + 2 > length)
+        return 0;
+
+    return (static_cast<uint16_t>(static_cast<unsigned char>(data[offset])) << 8) | static_cast<uint16_t>(static_cast<unsigned char>(data[offset + 1]));
+}
+
+static int16_t readS16(const char* data, unsigned int length, unsigned int offset)
+{
+    return static_cast<int16_t>(readU16(data, length, offset));
+}
+
+static uint32_t readU32(const char* data, unsigned int length, unsigned int offset)
+{
+    if (offset + 4 > length)
+        return 0;
+
+    return (static_cast<uint32_t>(static_cast<unsigned char>(data[offset])) << 24) |
+        (static_cast<uint32_t>(static_cast<unsigned char>(data[offset + 1])) << 16) |
+        (static_cast<uint32_t>(static_cast<unsigned char>(data[offset + 2])) << 8) |
+        static_cast<uint32_t>(static_cast<unsigned char>(data[offset + 3]));
+}
+
+static int32_t readS32(const char* data, unsigned int length, unsigned int offset)
+{
+    uint32_t value = readU32(data, length, offset);
+    if (value <= static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))
+        return static_cast<int32_t>(value);
+
+    return -static_cast<int32_t>((~value) + 1u);
+}
+
+static float fixed16Dot16ToFloat(int32_t value)
+{
+    return static_cast<float>(value) / 65536.0f;
+}
+
+struct TrackingTable
+{
+    std::vector<float> sizes;
+    std::vector<float> values;
+};
+
+static TrackingTable readTrackingTable(hb_face_t* face)
+{
+    TrackingTable result;
+    if (!face)
+        return result;
+
+    hb_blob_t* blob = hb_face_reference_table(face, HB_TAG('t', 'r', 'a', 'k'));
+    if (!blob)
+        return result;
+
+    unsigned int length = 0;
+    const char* data = hb_blob_get_data(blob, &length);
+    if (!data || length < 12)
+    {
+        hb_blob_destroy(blob);
+        return result;
+    }
+
+    uint16_t format = readU16(data, length, 4);
+    uint16_t horizontalOffset = readU16(data, length, 6);
+    if (format != 0 || horizontalOffset == 0 || horizontalOffset + 8 > length)
+    {
+        hb_blob_destroy(blob);
+        return result;
+    }
+
+    unsigned int trackData = horizontalOffset;
+    uint16_t trackCount = readU16(data, length, trackData);
+    uint16_t sizeCount = readU16(data, length, trackData + 2);
+    uint32_t sizeTableOffset = readU32(data, length, trackData + 4);
+    if (trackCount == 0 || sizeCount == 0 || trackData + 8u + static_cast<unsigned int>(trackCount) * 8u > length ||
+        sizeTableOffset + static_cast<unsigned int>(sizeCount) * 4u > length)
+    {
+        hb_blob_destroy(blob);
+        return result;
+    }
+
+    unsigned int normalTrackIndex = 0;
+    float closestTrack = std::numeric_limits<float>::max();
+    for (uint16_t i = 0; i < trackCount; i++)
+    {
+        unsigned int entryOffset = trackData + 8u + static_cast<unsigned int>(i) * 8u;
+        float track = fixed16Dot16ToFloat(readS32(data, length, entryOffset));
+        float distance = std::abs(track);
+        if (distance < closestTrack)
+        {
+            closestTrack = distance;
+            normalTrackIndex = i;
+        }
+    }
+
+    unsigned int normalEntry = trackData + 8u + normalTrackIndex * 8u;
+    uint16_t valueOffset = readU16(data, length, normalEntry + 6);
+    if (valueOffset + static_cast<unsigned int>(sizeCount) * 2u > length)
+    {
+        hb_blob_destroy(blob);
+        return result;
+    }
+
+    result.sizes.reserve(sizeCount);
+    result.values.reserve(sizeCount);
+    for (uint16_t i = 0; i < sizeCount; i++)
+    {
+        result.sizes.push_back(fixed16Dot16ToFloat(readS32(data, length, sizeTableOffset + static_cast<unsigned int>(i) * 4u)));
+        result.values.push_back(static_cast<float>(readS16(data, length, valueOffset + static_cast<unsigned int>(i) * 2u)));
+    }
+
+    hb_blob_destroy(blob);
+    return result;
+}
 #endif
 
 static FontMetrics fallbackMetrics(float fontSize)
@@ -543,6 +658,7 @@ static GlyphRun shapeWithFont(const std::string& utf8, const FontFace& fontFace,
     hb_glyph_position_t* positions = hb_buffer_get_glyph_positions(buffer, &glyphCount);
 
     float unitToPixel = fontSize / static_cast<float>(fontFace.unitsPerEm());
+    float tracking = fontFace.tracking(fontSize);
     std::vector<ShapedGlyph> glyphs;
     glyphs.reserve(glyphCount);
 
@@ -556,6 +672,7 @@ static GlyphRun shapeWithFont(const std::string& utf8, const FontFace& fontFace,
         glyph.yAdvance = static_cast<float>(positions[i].y_advance) * unitToPixel;
         glyph.xOffset = static_cast<float>(positions[i].x_offset) * unitToPixel;
         glyph.yOffset = static_cast<float>(positions[i].y_offset) * unitToPixel;
+        bool usedPlatformAdvance = false;
         if (fontFace.prefersPlatformGlyphMetrics())
         {
             GlyphMetrics metrics = fontFace.glyphMetrics(glyph.id, fontSize);
@@ -563,8 +680,11 @@ static GlyphRun shapeWithFont(const std::string& utf8, const FontFace& fontFace,
             {
                 glyph.xAdvance = metrics.xAdvance;
                 glyph.yAdvance = metrics.yAdvance;
+                usedPlatformAdvance = true;
             }
         }
+        if (!usedPlatformAdvance)
+            glyph.xAdvance += tracking;
         advance += glyph.xAdvance;
         glyphs.push_back(glyph);
     }
@@ -721,6 +841,38 @@ bool FontFace::prefersPlatformGlyphMetrics() const
     return preferPlatformGlyphMetrics;
 }
 
+float FontFace::tracking(float fontSize) const
+{
+    if (trackingSizes.empty() || trackingValues.empty() || fontUnitsPerEm == 0)
+        return 0.0f;
+
+    float value = trackingValues.front();
+    if (fontSize <= trackingSizes.front())
+    {
+        value = trackingValues.front();
+    }
+    else if (fontSize >= trackingSizes.back())
+    {
+        value = trackingValues.back();
+    }
+    else
+    {
+        for (size_t i = 1; i < trackingSizes.size(); i++)
+        {
+            if (fontSize > trackingSizes[i])
+                continue;
+
+            float previousSize = trackingSizes[i - 1];
+            float nextSize = trackingSizes[i];
+            float t = nextSize == previousSize ? 0.0f : (fontSize - previousSize) / (nextSize - previousSize);
+            value = trackingValues[i - 1] + (trackingValues[i] - trackingValues[i - 1]) * t;
+            break;
+        }
+    }
+
+    return value * fontSize / static_cast<float>(fontUnitsPerEm);
+}
+
 hb_face_t* FontFace::harfbuzzFace() const
 {
     return face;
@@ -816,6 +968,9 @@ bool FontFace::loadFromPath(
     platformAscenderRatio = nextPlatformAscenderRatio;
     platformDescenderRatio = nextPlatformDescenderRatio;
     platformLineGapRatio = nextPlatformLineGapRatio;
+    TrackingTable tracking = readTrackingTable(nextFace);
+    trackingSizes = std::move(tracking.sizes);
+    trackingValues = std::move(tracking.values);
     platformMetricsAvailable = platformFont && platformAscenderRatio > 0.0f;
     preferPlatformGlyphMetrics = platformFont && (hb_ot_color_has_png(nextFace) || hb_ot_color_has_svg(nextFace));
     return true;

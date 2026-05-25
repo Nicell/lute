@@ -1,13 +1,59 @@
 #include "lute/ui/Context.h"
 #include "lute/ui/Text.h"
 
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <CoreText/CoreText.h>
+#endif
+
 #include <algorithm>
+#include <cmath>
 #include <string>
 
 #include "cliruntimefixture.h"
 #include "doctest.h"
 
 using namespace lute::ui;
+
+#if defined(__APPLE__)
+static double coreTextLineWidth(const std::string& utf8)
+{
+    CFStringRef string = CFStringCreateWithBytes(
+        kCFAllocatorDefault,
+        reinterpret_cast<const UInt8*>(utf8.data()),
+        static_cast<CFIndex>(utf8.size()),
+        kCFStringEncodingUTF8,
+        false
+    );
+    if (!string)
+        return 0.0;
+
+    CTFontRef font = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, kDefaultUiFontSize, nullptr);
+    if (!font)
+    {
+        CFRelease(string);
+        return 0.0;
+    }
+
+    CFStringRef fontKey = kCTFontAttributeName;
+    const void* keys[] = {fontKey};
+    const void* values[] = {font};
+    CFDictionaryRef attributes = CFDictionaryCreate(kCFAllocatorDefault, keys, values, 1, nullptr, nullptr);
+    CFAttributedStringRef attributed = CFAttributedStringCreate(kCFAllocatorDefault, string, attributes);
+    CTLineRef line = attributed ? CTLineCreateWithAttributedString(attributed) : nullptr;
+    double width = line ? CTLineGetTypographicBounds(line, nullptr, nullptr, nullptr) : 0.0;
+
+    if (line)
+        CFRelease(line);
+    if (attributed)
+        CFRelease(attributed);
+    if (attributes)
+        CFRelease(attributes);
+    CFRelease(font);
+    CFRelease(string);
+    return width;
+}
+#endif
 
 TEST_CASE("ui_signal_invalidates_only_observed_text")
 {
@@ -247,6 +293,12 @@ TEST_CASE("ui_text_shapes_emoji_with_coretext_fallback")
     CHECK(emojiMetrics.width > 16.0f);
     CHECK(emojiMetrics.yBearing + emojiMetrics.height < 0.0f);
     CHECK(counter.advance > 75.0f);
+    double counterCoreText = coreTextLineWidth(std::string("\xf0\x9f\xa7\xae") + " Count: 0");
+    CHECK(std::abs(counter.advance - counterCoreText) < 0.02);
+
+    GlyphRun button = shaper.shapeSingleRun("Increment");
+    double buttonCoreText = coreTextLineWidth("Increment");
+    CHECK(std::abs(button.advance - buttonCoreText) < 0.02);
 #endif
 }
 

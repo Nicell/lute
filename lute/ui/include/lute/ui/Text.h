@@ -68,6 +68,7 @@ public:
     uint32_t unitsPerEm() const;
     FontMetrics metrics(float fontSize = kDefaultUiFontSize) const;
     GlyphMetrics glyphMetrics(uint32_t glyph, float fontSize = kDefaultUiFontSize) const;
+    float tracking(float fontSize = kDefaultUiFontSize) const;
     bool prefersPlatformGlyphMetrics() const;
 
     hb_face_t* harfbuzzFace() const;
@@ -96,6 +97,8 @@ private:
     float platformAscenderRatio = 0.0f;
     float platformDescenderRatio = 0.0f;
     float platformLineGapRatio = 0.0f;
+    std::vector<float> trackingSizes;
+    std::vector<float> trackingValues;
     bool platformMetricsAvailable = false;
     bool preferPlatformGlyphMetrics = false;
     bool loaded = false;
