@@ -1,18 +1,18 @@
 #include "lute/ui/Text.h"
 
+#include "lute/ui/Platform.h"
+
 #if LUTE_UI_USE_HARFBUZZ
 #include "hb.h"
 #include "hb-ot.h"
 #endif
 
 #if defined(__APPLE__) && LUTE_UI_USE_HARFBUZZ
-#include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
 #include <CoreText/CoreText.h>
 #endif
 
 #include <algorithm>
-#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -28,175 +28,7 @@ namespace lute::ui
 namespace
 {
 
-struct ResolvedFont
-{
-    std::string path;
-    std::string postScriptName;
-    std::shared_ptr<const void> platformFont;
-    float platformAscenderRatio = 0.0f;
-    float platformDescenderRatio = 0.0f;
-    float platformLineGapRatio = 0.0f;
-    std::vector<FontVariation> platformVariations;
-};
-
-#if defined(__APPLE__) && LUTE_UI_USE_HARFBUZZ
-static std::shared_ptr<const void> retainCoreTextFont(CTFontRef font)
-{
-    if (!font)
-        return {};
-
-    CFRetain(font);
-    return std::shared_ptr<const void>(font, [](const void* value) {
-        if (value)
-            CFRelease(value);
-    });
-}
-
-static CTFontRef createCoreTextSystemFont(float fontSize = 0.0f)
-{
-    CTFontRef font = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, fontSize, nullptr);
-    if (!font)
-        font = CTFontCreateWithName(CFSTR(".AppleSystemUIFont"), fontSize, nullptr);
-    return font;
-}
-
-static void collectCoreTextVariation(const void* key, const void* value, void* context)
-{
-    auto* variations = static_cast<std::vector<FontVariation>*>(context);
-    if (!key || !value || CFGetTypeID(key) != CFNumberGetTypeID() || CFGetTypeID(value) != CFNumberGetTypeID())
-        return;
-
-    int32_t tag = 0;
-    double axisValue = 0.0;
-    if (!CFNumberGetValue(static_cast<CFNumberRef>(key), kCFNumberSInt32Type, &tag) ||
-        !CFNumberGetValue(static_cast<CFNumberRef>(value), kCFNumberDoubleType, &axisValue))
-    {
-        return;
-    }
-
-    variations->push_back({static_cast<uint32_t>(tag), static_cast<float>(axisValue)});
-}
-
-static std::string cfStringToUtf8(CFStringRef string)
-{
-    if (!string)
-        return {};
-
-    CFIndex length = CFStringGetLength(string);
-    CFIndex maxSize = CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) + 1;
-    std::string result(static_cast<size_t>(maxSize), '\0');
-    if (!CFStringGetCString(string, result.data(), maxSize, kCFStringEncodingUTF8))
-        return {};
-
-    result.resize(std::char_traits<char>::length(result.c_str()));
-    return result;
-}
-
-static std::string cfUrlPath(CFURLRef url)
-{
-    if (!url)
-        return {};
-
-    UInt8 buffer[PATH_MAX];
-    if (!CFURLGetFileSystemRepresentation(url, true, buffer, sizeof(buffer)))
-        return {};
-
-    return reinterpret_cast<const char*>(buffer);
-}
-
-static ResolvedFont resolvedFontFromCoreTextFont(CTFontRef font)
-{
-    ResolvedFont result;
-    if (!font)
-        return result;
-
-    CGFloat size = CTFontGetSize(font);
-    if (size > 0.0)
-    {
-        result.platformFont = retainCoreTextFont(font);
-        result.platformAscenderRatio = static_cast<float>(CTFontGetAscent(font) / size);
-        result.platformDescenderRatio = static_cast<float>(CTFontGetDescent(font) / size);
-        result.platformLineGapRatio = static_cast<float>(CTFontGetLeading(font) / size);
-    }
-
-    CFDictionaryRef variations = CTFontCopyVariation(font);
-    if (variations)
-    {
-        CFDictionaryApplyFunction(variations, collectCoreTextVariation, &result.platformVariations);
-        CFRelease(variations);
-    }
-
-    CFStringRef postScriptName = CTFontCopyPostScriptName(font);
-    if (postScriptName)
-    {
-        result.postScriptName = cfStringToUtf8(postScriptName);
-        CFRelease(postScriptName);
-    }
-
-    CFTypeRef urlValue = CTFontCopyAttribute(font, kCTFontURLAttribute);
-    if (urlValue && CFGetTypeID(urlValue) == CFURLGetTypeID())
-        result.path = cfUrlPath(static_cast<CFURLRef>(urlValue));
-
-    if (urlValue)
-        CFRelease(urlValue);
-
-    if (result.path.empty())
-    {
-        CTFontDescriptorRef descriptor = CTFontCopyFontDescriptor(font);
-        if (descriptor)
-        {
-            CFTypeRef descriptorUrl = CTFontDescriptorCopyAttribute(descriptor, kCTFontURLAttribute);
-            if (descriptorUrl && CFGetTypeID(descriptorUrl) == CFURLGetTypeID())
-                result.path = cfUrlPath(static_cast<CFURLRef>(descriptorUrl));
-            if (descriptorUrl)
-                CFRelease(descriptorUrl);
-            CFRelease(descriptor);
-        }
-    }
-
-    return result;
-}
-
-static bool resolveCoreTextSystemFont(ResolvedFont& result)
-{
-    CTFontRef font = createCoreTextSystemFont();
-    if (!font)
-        return false;
-
-    result = resolvedFontFromCoreTextFont(font);
-    CFRelease(font);
-    return !result.path.empty();
-}
-
-static bool resolveCoreTextFallbackFont(std::string_view utf8, ResolvedFont& result)
-{
-    CTFontRef baseFont = createCoreTextSystemFont(kDefaultUiFontSize);
-    if (!baseFont)
-        return false;
-
-    CFStringRef string = CFStringCreateWithBytes(
-        kCFAllocatorDefault,
-        reinterpret_cast<const UInt8*>(utf8.data()),
-        static_cast<CFIndex>(utf8.size()),
-        kCFStringEncodingUTF8,
-        false
-    );
-    if (!string)
-    {
-        CFRelease(baseFont);
-        return false;
-    }
-
-    CTFontRef fallbackFont = CTFontCreateForString(baseFont, string, CFRangeMake(0, CFStringGetLength(string)));
-    result = resolvedFontFromCoreTextFont(fallbackFont ? fallbackFont : baseFont);
-
-    if (fallbackFont)
-        CFRelease(fallbackFont);
-    CFRelease(string);
-    CFRelease(baseFont);
-    return !result.path.empty();
-}
-#endif
+using ResolvedFont = PlatformFontDescriptor;
 
 static bool resolveFallbackFont(ResolvedFont& result)
 {
@@ -588,14 +420,14 @@ static std::vector<FontRun> fallbackFontRuns(const std::string& utf8)
     if (utf8.empty())
         return runs;
 
-#if defined(__APPLE__) && LUTE_UI_USE_HARFBUZZ
+#if LUTE_UI_USE_HARFBUZZ
     std::vector<TextCluster> clusters = textClusters(utf8);
     for (const TextCluster& cluster : clusters)
     {
         std::string_view clusterText(utf8.data() + cluster.start, cluster.end - cluster.start);
         ResolvedFont resolved;
         const FontFace* face = &defaultFace;
-        if (resolveCoreTextFallbackFont(clusterText, resolved))
+        if (nativeTextServices().resolveFallbackUIFont(clusterText, resolved))
             face = &fontFaceForResolvedFont(resolved);
 
         if (runs.empty() || runs.back().fontFace != face || runs.back().end != cluster.start)
@@ -886,9 +718,7 @@ hb_font_t* FontFace::harfbuzzFont() const
 bool FontFace::loadDefault()
 {
     ResolvedFont resolved;
-#if defined(__APPLE__) && LUTE_UI_USE_HARFBUZZ
-    resolveCoreTextSystemFont(resolved);
-#endif
+    nativeTextServices().resolveDefaultUIFont(resolved);
 
     if (resolved.path.empty() && !resolveFallbackFont(resolved))
         return false;

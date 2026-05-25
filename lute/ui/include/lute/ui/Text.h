@@ -43,6 +43,17 @@ struct FontVariation
     float value = 0.0f;
 };
 
+struct PlatformFontDescriptor
+{
+    std::string path;
+    std::string postScriptName;
+    std::shared_ptr<const void> platformFont;
+    float platformAscenderRatio = 0.0f;
+    float platformDescenderRatio = 0.0f;
+    float platformLineGapRatio = 0.0f;
+    std::vector<FontVariation> platformVariations;
+};
+
 class FontFace
 {
 public:
