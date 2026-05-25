@@ -1,0 +1,5 @@
+[dependency]
+name = "harfbuzz"
+remote = "https://github.com/harfbuzz/harfbuzz.git"
+branch = "14.2.0"
+revision = "b0ffab42d473eb380ad0fcf42730e0f1868cbc97"

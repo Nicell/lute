@@ -22,6 +22,10 @@ project(
     LANGUAGES CXX C
 )
 
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
+
 # Enable sanitizers globally before any subdirectory is added
 option(LUTE_ENABLE_SANITIZERS "Enable sanitizers" OFF)
 option(LUTE_STDLESS "Build without embedded Luau sources (for bootstrapping)" OFF)
@@ -87,6 +91,40 @@ set(LUAU_BUILD_CLI OFF)
 set(LUAU_BUILD_TESTS OFF)
 
 add_subdirectory(extern/luau)
+
+# harfbuzz setup
+set(HB_BUILD_UTILS OFF CACHE BOOL "Do not build HarfBuzz utilities" FORCE)
+set(HB_BUILD_SUBSET OFF CACHE BOOL "Do not build harfbuzz-subset" FORCE)
+set(HB_BUILD_RASTER OFF CACHE BOOL "Do not build harfbuzz-raster" FORCE)
+set(HB_BUILD_VECTOR OFF CACHE BOOL "Do not build harfbuzz-vector" FORCE)
+set(HB_BUILD_GPU ON CACHE BOOL "Build harfbuzz-gpu" FORCE)
+set(HB_HAVE_GLIB OFF CACHE BOOL "Do not use GLib in HarfBuzz" FORCE)
+set(HB_HAVE_ICU OFF CACHE BOOL "Do not use ICU in HarfBuzz" FORCE)
+set(HB_HAVE_FREETYPE OFF CACHE BOOL "Do not use FreeType in HarfBuzz" FORCE)
+set(HB_HAVE_CORETEXT OFF CACHE BOOL "Do not use CoreText in HarfBuzz" FORCE)
+add_subdirectory(extern/harfbuzz)
+
+# Dawn setup
+set(DAWN_FETCH_DEPENDENCIES ON CACHE BOOL "Fetch Dawn third-party dependencies during CMake configure" FORCE)
+set(DAWN_ENABLE_METAL ON CACHE BOOL "Enable Dawn Metal backend" FORCE)
+set(DAWN_ENABLE_NULL ON CACHE BOOL "Enable Dawn null backend" FORCE)
+set(DAWN_ENABLE_DESKTOP_GL OFF CACHE BOOL "Disable Dawn desktop OpenGL backend" FORCE)
+set(DAWN_ENABLE_OPENGLES OFF CACHE BOOL "Disable Dawn OpenGL ES backend" FORCE)
+set(DAWN_ENABLE_VULKAN OFF CACHE BOOL "Disable Dawn Vulkan backend" FORCE)
+set(DAWN_USE_GLFW OFF CACHE BOOL "Do not build Dawn GLFW helpers" FORCE)
+set(DAWN_BUILD_SAMPLES OFF CACHE BOOL "Do not build Dawn samples" FORCE)
+set(DAWN_BUILD_TESTS OFF CACHE BOOL "Do not build Dawn tests" FORCE)
+set(DAWN_BUILD_PROTOBUF OFF CACHE BOOL "Do not build Dawn protobuf support" FORCE)
+set(DAWN_BUILD_MONOLITHIC_LIBRARY STATIC CACHE STRING "Build Dawn monolithic static library" FORCE)
+if(LUTE_ENABLE_SANITIZERS AND NOT MSVC)
+    set(DAWN_ENABLE_ASAN ON CACHE BOOL "Build Dawn with AddressSanitizer when Lute sanitizers are enabled" FORCE)
+    set(DAWN_ENABLE_UBSAN ON CACHE BOOL "Build Dawn with UBSan when Lute sanitizers are enabled" FORCE)
+    set(DAWN_ENABLE_RTTI ON CACHE BOOL "Build Dawn with RTTI for UBSan vptr checks" FORCE)
+endif()
+set(TINT_BUILD_CMD_TOOLS OFF CACHE BOOL "Do not build Tint command line tools" FORCE)
+set(TINT_BUILD_TESTS OFF CACHE BOOL "Do not build Tint tests" FORCE)
+set(TINT_BUILD_IR_BINARY OFF CACHE BOOL "Do not build Tint IR binary support" FORCE)
+add_subdirectory(extern/dawn)
 
 # libuv setup
 set(LIBUV_BUILD_SHARED OFF)
@@ -234,6 +272,7 @@ endif()
 add_subdirectory(lute/batteries)
 add_subdirectory(lute/common)
 add_subdirectory(lute/definitions)
+add_subdirectory(lute/ui)
 add_subdirectory(lute/require)
 add_subdirectory(lute/runtime)
 add_subdirectory(lute/crypto)

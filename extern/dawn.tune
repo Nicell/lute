@@ -1,0 +1,5 @@
+[dependency]
+name = "dawn"
+remote = "https://dawn.googlesource.com/dawn"
+branch = "main"
+revision = "9aa45f938d4b36626722bbfdc2f18447179337e6"
