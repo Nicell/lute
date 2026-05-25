@@ -27,7 +27,13 @@ target_sources(Lute.UI PRIVATE
     src/ui/luau/LuauUiModule.cpp
     src/ui/platform/NativeShell.cpp
     src/ui/reactive/Signal.cpp
+    src/ui/render/dawn/DawnBackend.cpp
+    src/ui/render/dawn/DawnCommon.cpp
     src/ui/render/dawn/DawnDevice.cpp
+    src/ui/render/dawn/DawnInternal.h
+    src/ui/render/dawn/DawnImageGlyphAtlas.cpp
+    src/ui/render/dawn/DawnPipelines.cpp
+    src/ui/render/dawn/DawnTextRenderer.cpp
     src/ui/scene/Scene.cpp
     src/ui/text/Shaper.cpp
 )
