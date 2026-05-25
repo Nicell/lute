@@ -1,11 +1,5 @@
 #include "DawnInternal.h"
 
-#if defined(__APPLE__) && LUTE_UI_USE_HARFBUZZ_GPU
-#include <CoreFoundation/CoreFoundation.h>
-#include <CoreGraphics/CoreGraphics.h>
-#include <ImageIO/ImageIO.h>
-#endif
-
 #if LUTE_UI_USE_DAWN
 #include <algorithm>
 #include <cmath>
@@ -229,76 +223,6 @@ void appendImageGlyphVertices(std::vector<ImageGlyphVertex>& vertices, float x, 
     vertices.push_back(quad[2]);
     vertices.push_back(quad[3]);
 }
-
-#if LUTE_UI_USE_HARFBUZZ_GPU && defined(__APPLE__)
-std::optional<DecodedImage> decodeImageBlob(hb_blob_t* blob)
-{
-    if (!blob)
-        return std::nullopt;
-
-    unsigned int length = 0;
-    const char* data = hb_blob_get_data(blob, &length);
-    if (!data || length == 0)
-        return std::nullopt;
-
-    CFDataRef cfData = CFDataCreate(kCFAllocatorDefault, reinterpret_cast<const UInt8*>(data), static_cast<CFIndex>(length));
-    if (!cfData)
-        return std::nullopt;
-
-    CGImageSourceRef source = CGImageSourceCreateWithData(cfData, nullptr);
-    CFRelease(cfData);
-    if (!source)
-        return std::nullopt;
-
-    CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, nullptr);
-    CFRelease(source);
-    if (!image)
-        return std::nullopt;
-
-    size_t width = CGImageGetWidth(image);
-    size_t height = CGImageGetHeight(image);
-    if (width == 0 || height == 0 || width > kImageAtlasSize || height > kImageAtlasSize)
-    {
-        CGImageRelease(image);
-        return std::nullopt;
-    }
-
-    DecodedImage decoded;
-    decoded.width = static_cast<uint32_t>(width);
-    decoded.height = static_cast<uint32_t>(height);
-    decoded.pixels.assign(width * height * 4, 0);
-
-    CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    CGContextRef context = CGBitmapContextCreate(
-        decoded.pixels.data(),
-        width,
-        height,
-        8,
-        width * 4,
-        colorSpace,
-        static_cast<CGBitmapInfo>(kCGBitmapByteOrder32Big) | static_cast<CGBitmapInfo>(kCGImageAlphaPremultipliedLast)
-    );
-
-    if (colorSpace)
-        CGColorSpaceRelease(colorSpace);
-
-    if (!context)
-    {
-        CGImageRelease(image);
-        return std::nullopt;
-    }
-
-    CGContextDrawImage(context, CGRectMake(0.0, 0.0, static_cast<CGFloat>(width), static_cast<CGFloat>(height)), image);
-    CGContextRelease(context);
-    CGImageRelease(image);
-    return decoded;
-}
-#elif LUTE_UI_USE_HARFBUZZ_GPU
-std::optional<DecodedImage> decodeImageBlob(hb_blob_t*)
-{
-    return std::nullopt;
-}
-#endif
 
 } // namespace lute::ui::dawn
 #endif

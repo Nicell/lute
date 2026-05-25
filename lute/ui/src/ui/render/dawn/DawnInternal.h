@@ -31,7 +31,9 @@ namespace lute::ui::dawn
 
 constexpr uint64_t kAtlasCapacity = 256 * 1024;
 constexpr uint32_t kImageAtlasSize = 2048;
-constexpr uint32_t kImageAtlasPadding = 1;
+constexpr uint32_t kImageAtlasMipLevels = 4;
+constexpr uint32_t kImageAtlasGutter = 8;
+constexpr uint32_t kImageAtlasAlignment = 1u << (kImageAtlasMipLevels - 1);
 
 struct AdapterRequest
 {
@@ -115,6 +117,40 @@ struct DecodedImage
     std::vector<uint8_t> pixels;
 };
 
+enum class ImageGlyphBlobFormat
+{
+    Unknown,
+    Png,
+    Svg,
+};
+
+struct ImageGlyphDecodeRequest
+{
+    std::string_view bytes;
+    ImageGlyphBlobFormat format = ImageGlyphBlobFormat::Unknown;
+    uint32_t maxWidth = kImageAtlasSize - 2 * kImageAtlasGutter;
+    uint32_t maxHeight = kImageAtlasSize - 2 * kImageAtlasGutter;
+};
+
+class ImageGlyphDecoder
+{
+public:
+    virtual ~ImageGlyphDecoder() = default;
+    virtual std::optional<DecodedImage> decode(const ImageGlyphDecodeRequest& request) = 0;
+};
+
+struct ImageGlyphAtlasSlot
+{
+    uint32_t x = 0;
+    uint32_t y = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t uploadX = 0;
+    uint32_t uploadY = 0;
+    uint32_t uploadWidth = 0;
+    uint32_t uploadHeight = 0;
+};
+
 struct FrameVertices
 {
     std::vector<SolidVertex> solid;
@@ -168,7 +204,8 @@ void appendGlyphVertices(
 void appendImageGlyphVertices(std::vector<ImageGlyphVertex>& vertices, float x, float y, float fontSize, uint32_t upem, const ImageGlyph& glyph);
 
 #if LUTE_UI_USE_HARFBUZZ_GPU
-std::optional<DecodedImage> decodeImageBlob(hb_blob_t* blob);
+ImageGlyphDecoder& imageGlyphDecoder();
+std::optional<DecodedImage> decodeImageGlyphBlob(hb_blob_t* blob, ImageGlyphBlobFormat format);
 #endif
 
 class DawnBackend
@@ -229,7 +266,9 @@ private:
 
     const ImageGlyph* lookupImageGlyph(const FontFace& fontFace, hb_codepoint_t glyph, uint32_t targetPpem);
     ImageGlyph uploadImageGlyph(const FontFace& fontFace, hb_codepoint_t glyph, const DecodedImage& image);
-    bool allocateImageAtlas(uint32_t width, uint32_t height, uint32_t& x, uint32_t& y);
+    bool allocateImageAtlas(uint32_t width, uint32_t height, ImageGlyphAtlasSlot& slot);
+    bool uploadImageGlyphMipChain(const ImageGlyphAtlasSlot& slot, const DecodedImage& image);
+    bool resetImageGlyphAtlas();
 #endif
 
     bool ready = false;

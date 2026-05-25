@@ -30,6 +30,7 @@ target_sources(Lute.UI PRIVATE
     src/ui/render/dawn/DawnBackend.cpp
     src/ui/render/dawn/DawnCommon.cpp
     src/ui/render/dawn/DawnDevice.cpp
+    src/ui/render/dawn/DawnImageGlyphDecoder.cpp
     src/ui/render/dawn/DawnInternal.h
     src/ui/render/dawn/DawnImageGlyphAtlas.cpp
     src/ui/render/dawn/DawnPipelines.cpp
