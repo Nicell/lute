@@ -105,20 +105,48 @@ const std::unordered_map<NodeId, UiNode>& NodeTree::nodes() const
     return nodeById;
 }
 
+bool NodeTree::hasDirty(NodeId root, DirtyBits bits) const
+{
+    const UiNode* node = get(root);
+    if (!node)
+        return false;
+
+    if (lute::ui::hasDirty(node->dirty, bits))
+        return true;
+
+    for (NodeId child : node->children)
+    {
+        if (hasDirty(child, bits))
+            return true;
+    }
+
+    return false;
+}
+
 void NodeTree::markDirty(NodeId id, DirtyBits bits)
 {
     UiNode* node = get(id);
     if (!node)
         return;
 
-    node->dirty |= bits;
+    DirtyBits expanded = bits;
+    if (lute::ui::hasDirty(bits, DirtyBits::Text))
+        expanded |= DirtyBits::Layout | DirtyBits::Paint | DirtyBits::Scene | DirtyBits::Semantics | DirtyBits::HitTest;
+    if (lute::ui::hasDirty(bits, DirtyBits::Layout))
+        expanded |= DirtyBits::Scene | DirtyBits::Semantics | DirtyBits::HitTest;
+    if (lute::ui::hasDirty(bits, DirtyBits::Paint))
+        expanded |= DirtyBits::Scene;
+    if (lute::ui::hasDirty(bits, DirtyBits::State))
+        expanded |= DirtyBits::Paint | DirtyBits::Scene | DirtyBits::Semantics;
+
+    node->dirty |= expanded;
 
     DirtyBits ancestorBits = DirtyBits::None;
-    if (hasDirty(bits, DirtyBits::Layout) || hasDirty(bits, DirtyBits::Text))
-        ancestorBits |= DirtyBits::Layout | DirtyBits::Scene | DirtyBits::HitTest;
-    if (hasDirty(bits, DirtyBits::Paint) || hasDirty(bits, DirtyBits::Scene) || hasDirty(bits, DirtyBits::Text))
+    if (lute::ui::hasDirty(expanded, DirtyBits::Layout) || lute::ui::hasDirty(expanded, DirtyBits::Text))
+        ancestorBits |= DirtyBits::Layout | DirtyBits::Scene | DirtyBits::Semantics | DirtyBits::HitTest;
+    if (lute::ui::hasDirty(expanded, DirtyBits::Paint) || lute::ui::hasDirty(expanded, DirtyBits::Scene))
         ancestorBits |= DirtyBits::Scene | DirtyBits::Paint;
-    if (hasDirty(bits, DirtyBits::Semantics) || hasDirty(bits, DirtyBits::Text))
+    if (lute::ui::hasDirty(expanded, DirtyBits::Semantics))
         ancestorBits |= DirtyBits::Semantics;
 
     NodeId parent = node->parent;
@@ -140,6 +168,18 @@ void NodeTree::clearDirty(NodeId id, DirtyBits bits)
         return;
 
     node->dirty = static_cast<DirtyBits>(static_cast<uint32_t>(node->dirty) & ~static_cast<uint32_t>(bits));
+}
+
+void NodeTree::clearDirtySubtree(NodeId root, DirtyBits bits)
+{
+    UiNode* node = get(root);
+    if (!node)
+        return;
+
+    clearDirty(root, bits);
+    std::vector<NodeId> children = node->children;
+    for (NodeId child : children)
+        clearDirtySubtree(child, bits);
 }
 
 void NodeTree::setTitle(NodeId id, std::string title)

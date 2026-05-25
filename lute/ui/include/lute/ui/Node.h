@@ -43,8 +43,10 @@ public:
     const UiNode* get(NodeId id) const;
     const std::unordered_map<NodeId, UiNode>& nodes() const;
 
+    bool hasDirty(NodeId root, DirtyBits bits) const;
     void markDirty(NodeId id, DirtyBits bits);
     void clearDirty(NodeId id, DirtyBits bits = kAllDirtyBits);
+    void clearDirtySubtree(NodeId root, DirtyBits bits = kAllDirtyBits);
 
     void setTitle(NodeId id, std::string title);
     void setText(NodeId id, std::string text);

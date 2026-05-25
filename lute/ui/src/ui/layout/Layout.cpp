@@ -64,7 +64,7 @@ void LayoutEngine::place(NodeTree& tree, NodeId id, Rect rect)
     if (!node)
         return;
 
-    placeNode(tree, *node, rect);
+    placeNode(tree, *node, rect, false);
 }
 
 MeasureResult LayoutEngine::measureNode(NodeTree& tree, UiNode& node, Constraints constraints)
@@ -152,9 +152,15 @@ MeasureResult LayoutEngine::measureNode(NodeTree& tree, UiNode& node, Constraint
     return result;
 }
 
-void LayoutEngine::placeNode(NodeTree& tree, UiNode& node, Rect rect)
+void LayoutEngine::placeNode(NodeTree& tree, UiNode& node, Rect rect, bool force)
 {
+    bool frameChanged = node.layout.frame != rect;
+    bool needsPlacement = force || frameChanged || hasDirty(node.dirty, DirtyBits::Layout) || hasDirty(node.dirty, DirtyBits::HitTest);
+    if (!needsPlacement)
+        return;
+
     node.layout.frame = rect;
+    bool forceChildren = force || frameChanged;
 
     switch (node.kind)
     {
@@ -167,10 +173,11 @@ void LayoutEngine::placeNode(NodeTree& tree, UiNode& node, Rect rect)
             UiNode* child = tree.get(node.children.front());
             if (child)
             {
-                place(
+                placeNode(
                     tree,
-                    child->id,
-                    {rect.x + node.padding.left, rect.y + node.padding.top, child->layout.measuredSize.x, child->layout.measuredSize.y}
+                    *child,
+                    {rect.x + node.padding.left, rect.y + node.padding.top, child->layout.measuredSize.x, child->layout.measuredSize.y},
+                    forceChildren
                 );
             }
         }
@@ -185,7 +192,7 @@ void LayoutEngine::placeNode(NodeTree& tree, UiNode& node, Rect rect)
             if (!child)
                 continue;
 
-            place(tree, childId, {rect.x + node.padding.left, cursorY, child->layout.measuredSize.x, child->layout.measuredSize.y});
+            placeNode(tree, *child, {rect.x + node.padding.left, cursorY, child->layout.measuredSize.x, child->layout.measuredSize.y}, forceChildren);
             cursorY += child->layout.measuredSize.y + node.gap;
         }
         break;
@@ -199,7 +206,7 @@ void LayoutEngine::placeNode(NodeTree& tree, UiNode& node, Rect rect)
             if (!child)
                 continue;
 
-            place(tree, childId, {cursorX, rect.y + node.padding.top, child->layout.measuredSize.x, child->layout.measuredSize.y});
+            placeNode(tree, *child, {cursorX, rect.y + node.padding.top, child->layout.measuredSize.x, child->layout.measuredSize.y}, forceChildren);
             cursorX += child->layout.measuredSize.x + node.gap;
         }
         break;

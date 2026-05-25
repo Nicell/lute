@@ -51,16 +51,22 @@ void UiContext::flush()
     if (id == kInvalidNodeId)
         return;
 
-    layoutEngine.layout(tree, id, viewportSize);
-    Scene nextScene = sceneBuilder.build(tree, id);
-    scene.replace(std::vector<DisplayItem>(nextScene.items().begin(), nextScene.items().end()));
-    semantics = semanticsBuilder.build(tree, id);
+    if (tree.hasDirty(id, DirtyBits::Layout | DirtyBits::Text))
+        layoutEngine.layout(tree, id, viewportSize);
 
-    for (const auto& [nodeId, node] : tree.nodes())
+    if (scene.generation() == 0 || tree.hasDirty(id, DirtyBits::Scene | DirtyBits::Paint | DirtyBits::State))
     {
-        (void)node;
-        tree.clearDirty(nodeId, DirtyBits::Paint | DirtyBits::Scene | DirtyBits::Semantics | DirtyBits::State);
+        sceneBuilder.update(tree, id, scene);
+        tree.clearDirtySubtree(id, DirtyBits::Paint | DirtyBits::Scene);
     }
+
+    if (semantics.generation() == 0 || tree.hasDirty(id, DirtyBits::Semantics | DirtyBits::State))
+    {
+        semanticsBuilder.update(tree, id, semantics);
+        tree.clearDirtySubtree(id, DirtyBits::Semantics);
+    }
+
+    tree.clearDirtySubtree(id, DirtyBits::State);
 }
 
 RenderStats UiContext::render()

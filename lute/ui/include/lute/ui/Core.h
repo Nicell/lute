@@ -82,6 +82,16 @@ struct Rect
     float width = 0.0f;
     float height = 0.0f;
 
+    bool operator==(const Rect& rhs) const
+    {
+        return x == rhs.x && y == rhs.y && width == rhs.width && height == rhs.height;
+    }
+
+    bool operator!=(const Rect& rhs) const
+    {
+        return !(*this == rhs);
+    }
+
     bool contains(Vec2 point) const
     {
         return point.x >= x && point.y >= y && point.x <= x + width && point.y <= y + height;

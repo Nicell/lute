@@ -86,6 +86,134 @@ TEST_CASE("ui_column_layout_and_button_activation")
     CHECK(activations == 1);
 }
 
+TEST_CASE("ui_flush_skips_clean_layout_scene_and_semantics")
+{
+    UiContext context;
+    NodeId window = context.createNode(WidgetKind::Window);
+    NodeId column = context.createNode(WidgetKind::Column);
+    NodeId text = context.createNode(WidgetKind::Text);
+    NodeId button = context.createNode(WidgetKind::Button);
+
+    context.setRoot(window);
+    context.nodes().appendChild(window, column);
+    context.nodes().appendChild(column, text);
+    context.nodes().appendChild(column, button);
+    context.nodes().setGap(column, 12.0f);
+    context.nodes().setPadding(column, EdgeInsets::all(24.0f));
+    context.nodes().setText(text, "Count: 0");
+    context.nodes().setText(button, "Increment");
+    context.nodes().setOnActivate(button, []() {});
+
+    context.flush();
+
+    uint64_t windowLayout = context.nodes().get(window)->layout.generation;
+    uint64_t columnLayout = context.nodes().get(column)->layout.generation;
+    uint64_t textLayout = context.nodes().get(text)->layout.generation;
+    uint64_t buttonLayout = context.nodes().get(button)->layout.generation;
+    uint64_t sceneGeneration = context.currentScene().generation();
+    uint64_t semanticGeneration = context.currentSemantics().generation();
+
+    context.flush();
+
+    CHECK(context.nodes().get(window)->layout.generation == windowLayout);
+    CHECK(context.nodes().get(column)->layout.generation == columnLayout);
+    CHECK(context.nodes().get(text)->layout.generation == textLayout);
+    CHECK(context.nodes().get(button)->layout.generation == buttonLayout);
+    CHECK(context.currentScene().generation() == sceneGeneration);
+    CHECK(context.currentSemantics().generation() == semanticGeneration);
+}
+
+TEST_CASE("ui_flush_recomputes_only_signal_affected_layout_branch")
+{
+    UiContext context;
+    NodeId window = context.createNode(WidgetKind::Window);
+    NodeId column = context.createNode(WidgetKind::Column);
+    NodeId observedText = context.createNode(WidgetKind::Text);
+    NodeId staticText = context.createNode(WidgetKind::Text);
+    NodeId button = context.createNode(WidgetKind::Button);
+
+    context.setRoot(window);
+    context.nodes().appendChild(window, column);
+    context.nodes().appendChild(column, observedText);
+    context.nodes().appendChild(column, staticText);
+    context.nodes().appendChild(column, button);
+    context.nodes().setGap(column, 12.0f);
+    context.nodes().setPadding(column, EdgeInsets::all(24.0f));
+    context.nodes().setText(staticText, "Static");
+    context.nodes().setText(button, "Increment");
+    context.nodes().setOnActivate(button, []() {});
+
+    Signal<int> count(context.reactive(), 0);
+    Effect effect(
+        context.reactive(),
+        [&]()
+        {
+            context.nodes().setText(observedText, "Count: " + std::to_string(count.get()));
+        }
+    );
+
+    context.flush();
+
+    uint64_t windowLayout = context.nodes().get(window)->layout.generation;
+    uint64_t columnLayout = context.nodes().get(column)->layout.generation;
+    uint64_t observedLayout = context.nodes().get(observedText)->layout.generation;
+    uint64_t staticLayout = context.nodes().get(staticText)->layout.generation;
+    uint64_t buttonLayout = context.nodes().get(button)->layout.generation;
+    uint64_t sceneGeneration = context.currentScene().generation();
+    uint64_t semanticGeneration = context.currentSemantics().generation();
+
+    count.set(1);
+    context.flush();
+
+    CHECK(context.nodes().get(window)->layout.generation > windowLayout);
+    CHECK(context.nodes().get(column)->layout.generation > columnLayout);
+    CHECK(context.nodes().get(observedText)->layout.generation > observedLayout);
+    CHECK(context.nodes().get(staticText)->layout.generation == staticLayout);
+    CHECK(context.nodes().get(button)->layout.generation == buttonLayout);
+    CHECK(context.currentScene().generation() == sceneGeneration + 1);
+    CHECK(context.currentSemantics().generation() == semanticGeneration + 1);
+    CHECK(context.nodes().get(observedText)->dirty == DirtyBits::None);
+    CHECK(context.nodes().get(staticText)->dirty == DirtyBits::None);
+
+    sceneGeneration = context.currentScene().generation();
+    semanticGeneration = context.currentSemantics().generation();
+    context.flush();
+    CHECK(context.currentScene().generation() == sceneGeneration);
+    CHECK(context.currentSemantics().generation() == semanticGeneration);
+}
+
+TEST_CASE("ui_state_change_updates_scene_and_semantics_without_relayout")
+{
+    UiContext context;
+    NodeId window = context.createNode(WidgetKind::Window);
+    NodeId column = context.createNode(WidgetKind::Column);
+    NodeId button = context.createNode(WidgetKind::Button);
+
+    context.setRoot(window);
+    context.nodes().appendChild(window, column);
+    context.nodes().appendChild(column, button);
+    context.nodes().setPadding(column, EdgeInsets::all(24.0f));
+    context.nodes().setText(button, "Increment");
+    context.nodes().setOnActivate(button, []() {});
+    context.flush();
+
+    uint64_t windowLayout = context.nodes().get(window)->layout.generation;
+    uint64_t columnLayout = context.nodes().get(column)->layout.generation;
+    uint64_t buttonLayout = context.nodes().get(button)->layout.generation;
+    uint64_t sceneGeneration = context.currentScene().generation();
+    uint64_t semanticGeneration = context.currentSemantics().generation();
+
+    context.nodes().setDisabled(button, true);
+    context.flush();
+
+    CHECK(context.nodes().get(window)->layout.generation == windowLayout);
+    CHECK(context.nodes().get(column)->layout.generation == columnLayout);
+    CHECK(context.nodes().get(button)->layout.generation == buttonLayout);
+    CHECK(context.currentScene().generation() == sceneGeneration + 1);
+    CHECK(context.currentSemantics().generation() == semanticGeneration + 1);
+    CHECK(context.currentSemantics().dump().find("disabled") != std::string::npos);
+}
+
 TEST_CASE("ui_text_shapes_emoji_with_coretext_fallback")
 {
     TextShaper shaper;

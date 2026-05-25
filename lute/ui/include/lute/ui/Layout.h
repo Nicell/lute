@@ -39,7 +39,7 @@ public:
 
 private:
     MeasureResult measureNode(NodeTree& tree, UiNode& node, Constraints constraints);
-    void placeNode(NodeTree& tree, UiNode& node, Rect rect);
+    void placeNode(NodeTree& tree, UiNode& node, Rect rect, bool force);
 };
 
 } // namespace lute::ui
