@@ -1,5 +1,6 @@
 #include "lute/ui/Accessibility.h"
 #include "lute/ui/Profile.h"
+#include "lute/ui/Style.h"
 
 #include <sstream>
 
@@ -145,7 +146,7 @@ SemanticNode SemanticsBuilder::makeNode(const UiNode& node, std::optional<Semant
     semantic.id = node.id;
     semantic.parent = parent;
     semantic.role = roleForWidget(node.kind);
-    semantic.bounds = node.layout.frame;
+    semantic.bounds = widgetSemanticBounds(node);
     semantic.focusable = node.focusable;
     semantic.focused = node.focused;
     semantic.disabled = node.disabled;

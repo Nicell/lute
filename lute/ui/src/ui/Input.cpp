@@ -1,4 +1,5 @@
 #include "lute/ui/Input.h"
+#include "lute/ui/Style.h"
 
 namespace lute::ui
 {
@@ -11,7 +12,7 @@ static bool isInteractive(const UiNode& node)
 std::optional<NodeId> InputRouter::hitTest(const NodeTree& tree, NodeId root, Vec2 point) const
 {
     const UiNode* node = tree.get(root);
-    if (!node || !node->layout.frame.contains(point))
+    if (!node || !widgetHitBounds(*node).contains(point))
         return std::nullopt;
 
     for (auto it = node->children.rbegin(); it != node->children.rend(); ++it)

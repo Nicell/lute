@@ -1,5 +1,6 @@
 #include "lute/ui/Scene.h"
 #include "lute/ui/Profile.h"
+#include "lute/ui/Style.h"
 #include "lute/ui/Text.h"
 
 #include <cmath>
@@ -11,21 +12,6 @@ namespace lute::ui
 
 namespace
 {
-
-constexpr Color kWindowBackground = {245, 245, 242, 255};
-constexpr Color kDefaultTextColor = {28, 30, 33, 255};
-constexpr Color kButtonTextColor = {255, 255, 255, 255};
-constexpr Color kFocusRingColor = {10, 132, 255, 115};
-
-Color buttonFillColor(const UiNode& node)
-{
-    return {38, 101, 214, node.disabled ? uint8_t(120) : uint8_t(255)};
-}
-
-EdgeInsets buttonPadding(const UiNode& node)
-{
-    return node.padding.horizontal() == 0.0f && node.padding.vertical() == 0.0f ? EdgeInsets{6.0f, 12.0f, 6.0f, 12.0f} : node.padding;
-}
 
 std::optional<Color> resolveBackgroundHint(Color fill, std::optional<Color> backdrop)
 {
@@ -54,15 +40,6 @@ DisplayItem makeFill(DisplayItemKind kind, NodeId node, Rect rect, float radius,
     item.radius = radius;
     item.fill = {color};
     return item;
-}
-
-Rect inflate(Rect rect, float amount)
-{
-    rect.x -= amount;
-    rect.y -= amount;
-    rect.width += amount * 2.0f;
-    rect.height += amount * 2.0f;
-    return rect;
 }
 
 DisplayItem makeTextRun(
@@ -217,8 +194,8 @@ SceneBuilder::LocalEmission SceneBuilder::emitLocal(const UiNode& node, std::opt
     switch (node.kind)
     {
     case WidgetKind::Window:
-        emission.localItems.push_back(makeFill(DisplayItemKind::Rect, node.id, node.layout.frame, 0.0f, kWindowBackground));
-        emission.childBackgroundHint = resolveBackgroundHint(kWindowBackground, backgroundHint);
+        emission.localItems.push_back(makeFill(DisplayItemKind::Rect, node.id, node.layout.frame, 0.0f, kWindowBackgroundColor));
+        emission.childBackgroundHint = resolveBackgroundHint(kWindowBackgroundColor, backgroundHint);
         break;
     case WidgetKind::Box:
     case WidgetKind::Column:
@@ -238,19 +215,28 @@ SceneBuilder::LocalEmission SceneBuilder::emitLocal(const UiNode& node, std::opt
         break;
     case WidgetKind::Button:
     {
-        Color buttonFill = buttonFillColor(node);
-        EdgeInsets padding = buttonPadding(node);
-        std::optional<Color> buttonBackgroundHint = resolveBackgroundHint(buttonFill, backgroundHint);
+        ControlMetrics metrics = resolveButtonMetrics(node);
+        std::optional<Color> buttonBackgroundHint = resolveBackgroundHint(metrics.fillColor, backgroundHint);
         if (node.focusVisible)
-            emission.localItems.push_back(makeFill(DisplayItemKind::RoundedRect, node.id, inflate(node.layout.frame, 3.0f), 9.0f, kFocusRingColor));
-        emission.localItems.push_back(makeFill(DisplayItemKind::RoundedRect, node.id, node.layout.frame, 6.0f, buttonFill));
+        {
+            emission.localItems.push_back(makeFill(
+                DisplayItemKind::RoundedRect,
+                node.id,
+                controlFocusRingBounds(node, metrics),
+                controlFocusRingRadius(metrics),
+                metrics.focusRingColor
+            ));
+        }
+        emission.localItems.push_back(
+            makeFill(DisplayItemKind::RoundedRect, node.id, controlVisualBounds(node), metrics.cornerRadius, metrics.fillColor)
+        );
         emission.localItems.push_back(makeTextRun(
             node.id,
-            node.layout.frame,
-            kButtonTextColor,
+            controlVisualBounds(node),
+            metrics.textColor,
             node.text,
             node.shapedText,
-            {node.layout.frame.x + padding.left, node.layout.frame.y + node.layout.firstBaseline.value_or(21.0f)},
+            controlLabelOrigin(node, metrics),
             buttonBackgroundHint
         ));
         emission.childBackgroundHint = buttonBackgroundHint;

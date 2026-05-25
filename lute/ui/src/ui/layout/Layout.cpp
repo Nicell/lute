@@ -1,5 +1,6 @@
 #include "lute/ui/Layout.h"
 #include "lute/ui/Profile.h"
+#include "lute/ui/Style.h"
 #include "lute/ui/Text.h"
 
 #include <algorithm>
@@ -152,11 +153,10 @@ MeasureResult LayoutEngine::measureNode(NodeTree& tree, UiNode& node, Constraint
     }
     case WidgetKind::Button:
     {
-        EdgeInsets padding =
-            node.padding.horizontal() == 0.0f && node.padding.vertical() == 0.0f ? EdgeInsets{6.0f, 12.0f, 6.0f, 12.0f} : node.padding;
+        ControlMetrics metrics = resolveButtonMetrics(node);
         MeasureResult label = textMeasure(node);
-        result.size = clampSize({std::max(64.0f, label.size.x + padding.horizontal()), std::max(32.0f, label.size.y + padding.vertical())}, constraints);
-        result.firstBaseline = padding.top + label.firstBaseline.value_or(15.0f);
+        result.size = clampSize(controlPreferredSize(metrics, label.size), constraints);
+        result.firstBaseline = controlFirstBaseline(metrics, label.firstBaseline);
         result.lastBaseline = result.firstBaseline;
         break;
     }

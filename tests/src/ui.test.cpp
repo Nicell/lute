@@ -1,4 +1,5 @@
 #include "lute/ui/Context.h"
+#include "lute/ui/Style.h"
 #include "lute/ui/Text.h"
 
 #if defined(__APPLE__)
@@ -132,6 +133,88 @@ TEST_CASE("ui_column_layout_and_button_activation")
     CHECK(activations == 1);
     REQUIRE(context.focusedNode());
     CHECK(*context.focusedNode() == button);
+}
+
+TEST_CASE("ui_button_metrics_feed_layout_scene_input_and_semantics")
+{
+    UiContext context;
+    NodeId window = context.createNode(WidgetKind::Window);
+    NodeId button = context.createNode(WidgetKind::Button);
+
+    context.setRoot(window);
+    context.nodes().appendChild(window, button);
+    context.nodes().setPadding(button, EdgeInsets{10.0f, 20.0f, 10.0f, 20.0f});
+    context.nodes().setText(button, "Go");
+
+    int activations = 0;
+    context.nodes().setOnActivate(
+        button,
+        [&]()
+        {
+            activations++;
+        }
+    );
+
+    context.flush();
+
+    const UiNode* buttonNode = context.nodes().get(button);
+    REQUIRE(buttonNode);
+    REQUIRE(buttonNode->shapedText);
+
+    ControlMetrics metrics = resolveButtonMetrics(*buttonNode);
+    Vec2 labelSize{buttonNode->shapedText->advance, buttonNode->shapedText->metrics.lineHeight};
+    CHECK(buttonNode->layout.measuredSize == controlPreferredSize(metrics, labelSize));
+    REQUIRE(buttonNode->layout.firstBaseline);
+    CHECK(*buttonNode->layout.firstBaseline == controlFirstBaseline(metrics, buttonNode->shapedText->metrics.baseline));
+
+    REQUIRE(context.focus(button));
+    context.flush();
+
+    buttonNode = context.nodes().get(button);
+    REQUIRE(buttonNode);
+    metrics = resolveButtonMetrics(*buttonNode);
+
+    const std::vector<DisplayItem>& items = context.currentScene().items();
+    auto textItem = std::find_if(
+        items.begin(),
+        items.end(),
+        [button](const DisplayItem& item)
+        {
+            return item.kind == DisplayItemKind::TextRun && item.node == button;
+        }
+    );
+    REQUIRE(textItem != items.end());
+    CHECK(textItem->origin == controlLabelOrigin(*buttonNode, metrics));
+
+    auto focusRing = std::find_if(
+        items.begin(),
+        items.end(),
+        [&](const DisplayItem& item)
+        {
+            return item.kind == DisplayItemKind::RoundedRect && item.node == button && item.rect == controlFocusRingBounds(*buttonNode, metrics);
+        }
+    );
+    REQUIRE(focusRing != items.end());
+    CHECK(focusRing->radius == controlFocusRingRadius(metrics));
+
+    const std::vector<SemanticNode>& semanticNodes = context.currentSemantics().nodes();
+    auto semantic = std::find_if(
+        semanticNodes.begin(),
+        semanticNodes.end(),
+        [button](const SemanticNode& node)
+        {
+            return node.id == button;
+        }
+    );
+    REQUIRE(semantic != semanticNodes.end());
+    CHECK(semantic->bounds == controlSemanticBounds(*buttonNode, metrics));
+
+    lute::ui::Rect hitBounds = controlHitBounds(*buttonNode, metrics);
+    PointerEvent click;
+    click.kind = PointerEventKind::Up;
+    click.position = {hitBounds.x + hitBounds.width * 0.5f, hitBounds.y + hitBounds.height * 0.5f};
+    CHECK(context.dispatchPointer(click));
+    CHECK(activations == 1);
 }
 
 TEST_CASE("ui_focus_traversal_and_keyboard_activation")

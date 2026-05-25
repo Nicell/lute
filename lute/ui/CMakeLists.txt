@@ -13,6 +13,7 @@ target_sources(Lute.UI PRIVATE
     include/lute/ui/Render.h
     include/lute/ui/Scene.h
     include/lute/ui/Signal.h
+    include/lute/ui/Style.h
     include/lute/ui/Text.h
 
     src/ui/accessibility/Semantics.cpp
