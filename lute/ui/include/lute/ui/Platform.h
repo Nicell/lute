@@ -68,7 +68,7 @@ class NativeAccessibilityBridge
 public:
     virtual ~NativeAccessibilityBridge() = default;
     virtual void syncTree(const SemanticTree& tree) = 0;
-    virtual bool performAction(SemanticNodeId id, SemanticAction action) = 0;
+    virtual bool performAction(UiContext& context, SemanticNodeId id, SemanticAction action) = 0;
 };
 
 class NativeTextServices
@@ -85,6 +85,7 @@ NativeTextServices& nativeTextServices();
 
 bool dispatchNativePointer(UiContext& context, const PointerEvent& event, NodeId root = kInvalidNodeId);
 bool dispatchNativeKey(UiContext& context, const KeyEvent& event, NodeId root = kInvalidNodeId);
+bool dispatchNativeAccessibilityAction(UiContext& context, SemanticNodeId id, SemanticAction action);
 bool renderNativeFrame(UiContext& context, const NativeFrame& frame);
 bool renderNativeFrame(UiContext& context, NativeWindowSurface& surface);
 bool runNativeShell(std::shared_ptr<UiContext> context, std::string* error);

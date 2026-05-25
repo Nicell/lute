@@ -1,4 +1,5 @@
 #include "lute/ui/Context.h"
+#include "lute/ui/Platform.h"
 #include "lute/ui/Style.h"
 #include "lute/ui/Text.h"
 
@@ -280,6 +281,51 @@ TEST_CASE("ui_focus_traversal_and_keyboard_activation")
     CHECK(*context.focusedNode() == first);
     context.flush();
     CHECK(context.currentSemantics().dump().find("focused") != std::string::npos);
+}
+
+TEST_CASE("ui_native_accessibility_actions_route_through_semantics")
+{
+    UiContext context;
+    NodeId window = context.createNode(WidgetKind::Window);
+    NodeId column = context.createNode(WidgetKind::Column);
+    NodeId text = context.createNode(WidgetKind::Text);
+    NodeId button = context.createNode(WidgetKind::Button);
+
+    context.setRoot(window);
+    context.nodes().appendChild(window, column);
+    context.nodes().appendChild(column, text);
+    context.nodes().appendChild(column, button);
+    context.nodes().setText(text, "Count: 0");
+    context.nodes().setText(button, "Increment");
+
+    int activations = 0;
+    context.nodes().setOnActivate(
+        button,
+        [&]()
+        {
+            activations++;
+        }
+    );
+    context.flush();
+
+    NativeAccessibilityBridge& bridge = nativeAccessibilityBridge();
+    bridge.syncTree(context.currentSemantics());
+
+    CHECK(bridge.performAction(context, button, SemanticAction::Focus));
+    REQUIRE(context.focusedNode());
+    CHECK(*context.focusedNode() == button);
+    CHECK(context.currentSemantics().dump().find("focused") != std::string::npos);
+
+    CHECK(bridge.performAction(context, button, SemanticAction::Activate));
+    CHECK(activations == 1);
+
+    CHECK_FALSE(bridge.performAction(context, text, SemanticAction::Activate));
+
+    context.nodes().setDisabled(button, true);
+    context.flush();
+    bridge.syncTree(context.currentSemantics());
+    CHECK_FALSE(bridge.performAction(context, button, SemanticAction::Activate));
+    CHECK(activations == 1);
 }
 
 TEST_CASE("ui_flush_skips_clean_layout_scene_and_semantics")

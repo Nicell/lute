@@ -2,6 +2,8 @@
 
 #include "lute/ui/Context.h"
 
+#include <algorithm>
+
 namespace lute::ui
 {
 
@@ -13,6 +15,42 @@ bool dispatchNativePointer(UiContext& context, const PointerEvent& event, NodeId
 bool dispatchNativeKey(UiContext& context, const KeyEvent& event, NodeId root)
 {
     return context.dispatchKey(event, root);
+}
+
+bool dispatchNativeAccessibilityAction(UiContext& context, SemanticNodeId id, SemanticAction action)
+{
+    context.flush();
+
+    const std::vector<SemanticNode>& nodes = context.currentSemantics().nodes();
+    auto found = std::find_if(
+        nodes.begin(),
+        nodes.end(),
+        [id](const SemanticNode& node)
+        {
+            return node.id == id;
+        }
+    );
+    if (found == nodes.end() || found->disabled)
+        return false;
+
+    bool supportsAction = std::find(found->actions.begin(), found->actions.end(), action) != found->actions.end();
+    if (!supportsAction)
+        return false;
+
+    bool handled = false;
+    switch (action)
+    {
+    case SemanticAction::Focus:
+        handled = context.focus(static_cast<NodeId>(id));
+        break;
+    case SemanticAction::Activate:
+        handled = context.activate(static_cast<NodeId>(id));
+        break;
+    }
+
+    if (handled)
+        context.flush();
+    return handled;
 }
 
 bool renderNativeFrame(UiContext& context, const NativeFrame& frame)
@@ -55,22 +93,6 @@ private:
     std::optional<std::string> storedText;
 };
 
-class EmptyAccessibilityBridge final : public NativeAccessibilityBridge
-{
-public:
-    void syncTree(const SemanticTree& tree) override
-    {
-        (void)tree;
-    }
-
-    bool performAction(SemanticNodeId id, SemanticAction action) override
-    {
-        (void)id;
-        (void)action;
-        return false;
-    }
-};
-
 class EmptyTextServices final : public NativeTextServices
 {
 public:
@@ -94,12 +116,6 @@ NativeClipboard& nativeClipboard()
 {
     static EmptyClipboard clipboard;
     return clipboard;
-}
-
-NativeAccessibilityBridge& nativeAccessibilityBridge()
-{
-    static EmptyAccessibilityBridge bridge;
-    return bridge;
 }
 
 NativeTextServices& nativeTextServices()

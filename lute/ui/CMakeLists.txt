@@ -16,6 +16,7 @@ target_sources(Lute.UI PRIVATE
     include/lute/ui/Style.h
     include/lute/ui/Text.h
 
+    src/ui/accessibility/AccessKitBridge.cpp
     src/ui/accessibility/Semantics.cpp
     src/ui/core/Dirty.cpp
     src/ui/core/NodeTree.cpp

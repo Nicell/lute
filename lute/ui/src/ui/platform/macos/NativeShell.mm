@@ -292,25 +292,6 @@ public:
     }
 };
 
-class AppKitAccessibilityBridge final : public lute::ui::NativeAccessibilityBridge
-{
-public:
-    void syncTree(const lute::ui::SemanticTree& tree) override
-    {
-        syncedGeneration = tree.generation();
-    }
-
-    bool performAction(lute::ui::SemanticNodeId id, lute::ui::SemanticAction action) override
-    {
-        (void)id;
-        (void)action;
-        return false;
-    }
-
-private:
-    uint64_t syncedGeneration = 0;
-};
-
 class CoreTextServices final : public lute::ui::NativeTextServices
 {
 public:
@@ -560,12 +541,6 @@ NativeClipboard& nativeClipboard()
 {
     static AppKitClipboard clipboard;
     return clipboard;
-}
-
-NativeAccessibilityBridge& nativeAccessibilityBridge()
-{
-    static AppKitAccessibilityBridge bridge;
-    return bridge;
 }
 
 NativeTextServices& nativeTextServices()
