@@ -30,7 +30,7 @@ namespace lute::ui::dawn
 #if LUTE_UI_USE_DAWN
 
 constexpr uint64_t kAtlasCapacity = 256 * 1024;
-constexpr uint32_t kImageAtlasSize = 2048;
+constexpr uint32_t kImageAtlasSize = 512;
 constexpr uint32_t kImageAtlasMipLevels = 4;
 constexpr uint32_t kImageAtlasGutter = 8;
 constexpr uint32_t kImageAtlasAlignment = 1u << (kImageAtlasMipLevels - 1);
