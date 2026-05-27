@@ -47,6 +47,7 @@ struct PlatformFontDescriptor
 {
     std::string path;
     std::string postScriptName;
+    std::string probeText;
     std::shared_ptr<const void> platformFont;
     float platformAscenderRatio = 0.0f;
     float platformDescenderRatio = 0.0f;
@@ -62,6 +63,7 @@ public:
     FontFace(
         std::string path,
         std::string postScriptName,
+        std::string probeText,
         std::shared_ptr<const void> platformFont,
         float platformAscenderRatio,
         float platformDescenderRatio,
@@ -90,6 +92,7 @@ private:
     bool loadFromPath(
         std::string nextPath,
         std::string nextPostScriptName,
+        std::string nextProbeText = {},
         std::shared_ptr<const void> nextPlatformFont = {},
         float nextPlatformAscenderRatio = 0.0f,
         float nextPlatformDescenderRatio = 0.0f,
@@ -125,6 +128,9 @@ struct ShapedGlyph
 {
     const FontFace* fontFace = nullptr;
     uint32_t id = 0;
+    uint32_t cluster = 0;
+    size_t sourceStart = 0;
+    size_t sourceEnd = 0;
     float xAdvance = 0.0f;
     float yAdvance = 0.0f;
     float xOffset = 0.0f;
@@ -141,10 +147,43 @@ struct GlyphRun
     bool rightToLeft = false;
 };
 
+struct TextRunFragment
+{
+    std::shared_ptr<const GlyphRun> glyphRun;
+    float xOffset = 0.0f;
+    size_t sourceStart = 0;
+    size_t sourceEnd = 0;
+};
+
+struct TextLine
+{
+    std::vector<TextRunFragment> runs;
+    float advance = 0.0f;
+    float lineHeight = 0.0f;
+    float baseline = 0.0f;
+    FontMetrics metrics;
+    size_t sourceStart = 0;
+    size_t sourceEnd = 0;
+    bool rightToLeft = false;
+};
+
+struct TextLayout
+{
+    std::string text;
+    std::vector<TextLine> lines;
+    Vec2 size;
+    float fontSize = kDefaultUiFontSize;
+    float maxWidth = 0.0f;
+    FontMetrics metrics;
+    bool validUtf8 = true;
+    bool wrapped = false;
+};
+
 class TextShaper
 {
 public:
     GlyphRun shapeSingleRun(const std::string& utf8, float fontSize = kDefaultUiFontSize) const;
+    TextLayout layoutParagraph(const std::string& utf8, float fontSize = kDefaultUiFontSize, float maxWidth = 0.0f) const;
     MeasureResult measureSingleLine(const std::string& utf8, float fontSize = kDefaultUiFontSize) const;
 };
 

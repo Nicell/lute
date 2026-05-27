@@ -31,6 +31,26 @@ std::string_view phaseName(ProfilePhase phase)
         return "layout";
     case ProfilePhase::Text:
         return "text";
+    case ProfilePhase::TextUtfValidate:
+        return "text_utf_validate";
+    case ProfilePhase::TextGrapheme:
+        return "text_grapheme";
+    case ProfilePhase::TextLineBreak:
+        return "text_linebreak";
+    case ProfilePhase::TextBidi:
+        return "text_bidi";
+    case ProfilePhase::TextScript:
+        return "text_script";
+    case ProfilePhase::TextFontFallback:
+        return "text_font_fallback";
+    case ProfilePhase::TextFontCoverage:
+        return "text_font_coverage";
+    case ProfilePhase::TextNativeFallback:
+        return "text_native_fallback";
+    case ProfilePhase::TextHbShape:
+        return "text_hb_shape";
+    case ProfilePhase::TextWrap:
+        return "text_wrap";
     case ProfilePhase::Scene:
         return "scene";
     case ProfilePhase::Semantics:
@@ -152,6 +172,16 @@ std::string ProfileStore::dump(size_t limit) const
         dumpPhase(out, frame, ProfilePhase::Input);
         dumpPhase(out, frame, ProfilePhase::Layout);
         dumpPhase(out, frame, ProfilePhase::Text);
+        dumpPhase(out, frame, ProfilePhase::TextUtfValidate);
+        dumpPhase(out, frame, ProfilePhase::TextGrapheme);
+        dumpPhase(out, frame, ProfilePhase::TextLineBreak);
+        dumpPhase(out, frame, ProfilePhase::TextBidi);
+        dumpPhase(out, frame, ProfilePhase::TextScript);
+        dumpPhase(out, frame, ProfilePhase::TextFontFallback);
+        dumpPhase(out, frame, ProfilePhase::TextFontCoverage);
+        dumpPhase(out, frame, ProfilePhase::TextNativeFallback);
+        dumpPhase(out, frame, ProfilePhase::TextHbShape);
+        dumpPhase(out, frame, ProfilePhase::TextWrap);
         dumpPhase(out, frame, ProfilePhase::Scene);
         dumpPhase(out, frame, ProfilePhase::Semantics);
         dumpPhase(out, frame, ProfilePhase::Render);

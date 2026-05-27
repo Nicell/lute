@@ -203,15 +203,38 @@ SceneBuilder::LocalEmission SceneBuilder::emitLocal(const UiNode& node, std::opt
     case WidgetKind::Canvas:
         break;
     case WidgetKind::Text:
-        emission.localItems.push_back(makeTextRun(
-            node.id,
-            node.layout.frame,
-            kDefaultTextColor,
-            node.text,
-            node.shapedText,
-            {node.layout.frame.x, node.layout.frame.y + node.layout.firstBaseline.value_or(15.0f)},
-            backgroundHint
-        ));
+        if (node.textLayout && !node.textLayout->lines.empty())
+        {
+            for (const TextLine& line : node.textLayout->lines)
+            {
+                for (const TextRunFragment& fragment : line.runs)
+                {
+                    if (!fragment.glyphRun)
+                        continue;
+                    emission.localItems.push_back(makeTextRun(
+                        node.id,
+                        node.layout.frame,
+                        kDefaultTextColor,
+                        fragment.glyphRun->text,
+                        fragment.glyphRun,
+                        {node.layout.frame.x + fragment.xOffset, node.layout.frame.y + line.baseline},
+                        backgroundHint
+                    ));
+                }
+            }
+        }
+        else
+        {
+            emission.localItems.push_back(makeTextRun(
+                node.id,
+                node.layout.frame,
+                kDefaultTextColor,
+                node.text,
+                node.shapedText,
+                {node.layout.frame.x, node.layout.frame.y + node.layout.firstBaseline.value_or(15.0f)},
+                backgroundHint
+            ));
+        }
         break;
     case WidgetKind::Button:
     {

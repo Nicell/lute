@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace lute::ui
 {
@@ -74,9 +75,23 @@ public:
 class NativeTextServices
 {
 public:
+    struct FallbackFontRun
+    {
+        size_t start = 0;
+        size_t end = 0;
+        PlatformFontDescriptor font;
+    };
+
+    struct FallbackFontRange
+    {
+        size_t start = 0;
+        size_t end = 0;
+    };
+
     virtual ~NativeTextServices() = default;
     virtual bool resolveDefaultUIFont(PlatformFontDescriptor& out) const = 0;
     virtual bool resolveFallbackUIFont(std::string_view utf8, PlatformFontDescriptor& out) const = 0;
+    virtual bool resolveFallbackUIFontRuns(std::string_view utf8, const std::vector<FallbackFontRange>& ranges, std::vector<FallbackFontRun>& out) const = 0;
 };
 
 NativeClipboard& nativeClipboard();

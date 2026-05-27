@@ -1,0 +1,5 @@
+[dependency]
+name = "libgrapheme"
+remote = "https://git.suckless.org/libgrapheme"
+branch = "3.0.0"
+revision = "bf20d2f7bce13c7d006a9ca442221399753bce9d"

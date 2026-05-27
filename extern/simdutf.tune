@@ -1,0 +1,5 @@
+[dependency]
+name = "simdutf"
+remote = "https://github.com/simdutf/simdutf.git"
+branch = "v9.0.0"
+revision = "ca7acbcea967b5dcbab490066e99e3a6e6925539"

@@ -657,7 +657,127 @@ TEST_CASE("ui_text_shapes_emoji_with_coretext_fallback")
     GlyphRun button = shaper.shapeSingleRun("Increment");
     double buttonCoreText = coreTextLineWidth("Increment");
     CHECK(std::abs(button.advance - buttonCoreText) < 0.02);
+
+    std::string emojiRun = std::string("Emoji fallback: ") + "\xf0\x9f\xa7\xae" + " \xf0\x9f\x98\x80 \xf0\x9f\x98\x87 " +
+        "\xf0\x9f\xa7\x91\xf0\x9f\x8f\xbd\xe2\x80\x8d\xf0\x9f\x92\xbb" + " " +
+        "\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x91\xa9\xe2\x80\x8d\xf0\x9f\x91\xa7\xe2\x80\x8d\xf0\x9f\x91\xa6" + " " +
+        "\xf0\x9f\x87\xba\xf0\x9f\x87\xb8" + " " + "\xf0\x9f\x8f\xb3\xef\xb8\x8f\xe2\x80\x8d\xf0\x9f\x8c\x88" + " should";
+    GlyphRun shapedEmojiRun = shaper.shapeSingleRun(emojiRun);
+    CHECK(std::abs(shapedEmojiRun.advance - coreTextLineWidth(emojiRun)) < 1.0);
 #endif
+}
+
+TEST_CASE("ui_text_shapes_complex_fallback_without_tofu_or_expanded_line_height")
+{
+#if defined(__APPLE__)
+    TextShaper shaper;
+    std::string text = "\xe0\xa4\xa8\xe0\xa4\xae\xe0\xa4\xb8\xe0\xa5\x8d\xe0\xa4\xa4\xe0\xa5\x87";
+    GlyphRun run = shaper.shapeSingleRun(text);
+
+    REQUIRE(!run.glyphs.empty());
+    CHECK(std::all_of(
+        run.glyphs.begin(),
+        run.glyphs.end(),
+        [](const ShapedGlyph& glyph)
+        {
+            return glyph.id != 0;
+        }
+    ));
+
+    TextLayout layout = shaper.layoutParagraph("Indic fallback: " + text);
+    REQUIRE(layout.lines.size() == 1);
+    CHECK(std::abs(layout.lines.front().lineHeight - defaultUiFontFace().metrics().lineHeight) < 0.01f);
+#endif
+}
+
+TEST_CASE("ui_text_layout_sanitizes_invalid_utf8")
+{
+    std::string invalid = "A";
+    invalid.push_back(static_cast<char>(0xc0));
+    invalid.push_back(static_cast<char>(0xaf));
+    invalid += "B";
+
+    TextShaper shaper;
+    TextLayout layout = shaper.layoutParagraph(invalid);
+
+    CHECK_FALSE(layout.validUtf8);
+    CHECK(layout.text.find("\xef\xbf\xbd") != std::string::npos);
+    REQUIRE(layout.lines.size() == 1);
+    CHECK(layout.lines.front().advance > 0.0f);
+
+    GlyphRun run = shaper.shapeSingleRun(invalid);
+    CHECK(run.text.find("\xef\xbf\xbd") != std::string::npos);
+    CHECK(run.advance > 0.0f);
+}
+
+TEST_CASE("ui_text_layout_wraps_at_unicode_breaks_and_grapheme_boundaries")
+{
+    TextShaper shaper;
+    std::string text = std::string("A") + "\xf0\x9f\x99\x82" + " B";
+    float maxWidth = shaper.shapeSingleRun("A").advance + 1.0f;
+
+    TextLayout layout = shaper.layoutParagraph(text, kDefaultUiFontSize, maxWidth);
+
+    CHECK(layout.validUtf8);
+    CHECK(layout.wrapped);
+    REQUIRE(layout.lines.size() >= 3);
+
+    bool foundWholeEmojiLine = std::any_of(
+        layout.lines.begin(),
+        layout.lines.end(),
+        [&](const TextLine& line)
+        {
+            return layout.text.substr(line.sourceStart, line.sourceEnd - line.sourceStart) == "\xf0\x9f\x99\x82";
+        }
+    );
+    CHECK(foundWholeEmojiLine);
+}
+
+TEST_CASE("ui_text_layout_itemizes_bidi_runs")
+{
+    TextShaper shaper;
+    TextLayout layout = shaper.layoutParagraph(std::string("abc ") + "\xd7\xa9\xd7\x9c\xd7\x95\xd7\x9d" + " def");
+
+    REQUIRE(layout.lines.size() == 1);
+    CHECK(layout.lines.front().runs.size() >= 3);
+    CHECK(std::any_of(
+        layout.lines.front().runs.begin(),
+        layout.lines.front().runs.end(),
+        [](const TextRunFragment& fragment)
+        {
+            return fragment.glyphRun && fragment.glyphRun->rightToLeft;
+        }
+    ));
+}
+
+TEST_CASE("ui_text_layout_feeds_wrapped_scene_text_runs")
+{
+    UiContext context;
+    NodeId window = context.createNode(WidgetKind::Window);
+    NodeId text = context.createNode(WidgetKind::Text);
+
+    context.setRoot(window);
+    context.nodes().appendChild(window, text);
+    context.nodes().setText(text, "hello world");
+    context.setViewport({50.0f, 200.0f});
+
+    context.flush();
+
+    const UiNode* textNode = context.nodes().get(text);
+    REQUIRE(textNode);
+    REQUIRE(textNode->textLayout);
+    REQUIRE(textNode->textLayout->lines.size() >= 2);
+
+    const std::vector<DisplayItem>& items = context.currentScene().items();
+    size_t textRuns = static_cast<size_t>(std::count_if(
+        items.begin(),
+        items.end(),
+        [text](const DisplayItem& item)
+        {
+            return item.kind == DisplayItemKind::TextRun && item.node == text;
+        }
+    ));
+    CHECK(textRuns >= textNode->textLayout->lines.size());
 }
 
 TEST_CASE("ui_scene_and_semantics_are_retained_outputs")

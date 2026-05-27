@@ -213,6 +213,7 @@ void NodeTree::setText(NodeId id, std::string text)
 
     node->text = std::move(text);
     node->shapedText.reset();
+    node->textLayout.reset();
     markDirty(id, DirtyBits::Text | DirtyBits::Layout | DirtyBits::Paint | DirtyBits::Scene | DirtyBits::Semantics | DirtyBits::HitTest);
 }
 

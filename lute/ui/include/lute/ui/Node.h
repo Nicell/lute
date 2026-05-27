@@ -12,6 +12,7 @@ namespace lute::ui
 {
 
 struct GlyphRun;
+struct TextLayout;
 struct TextInputEvent;
 struct ImeCompositionEvent;
 
@@ -28,6 +29,7 @@ struct UiNode
     std::string title;
     std::string text;
     std::shared_ptr<const GlyphRun> shapedText;
+    std::shared_ptr<const TextLayout> textLayout;
     float gap = 0.0f;
     EdgeInsets padding;
     bool focusable = false;

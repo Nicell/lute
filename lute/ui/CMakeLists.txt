@@ -62,6 +62,21 @@ if(TARGET harfbuzz-gpu)
     target_link_libraries(Lute.UI PUBLIC harfbuzz-gpu)
 endif()
 
+if(TARGET simdutf::simdutf)
+    target_compile_definitions(Lute.UI PRIVATE LUTE_UI_USE_SIMDUTF=1)
+    target_link_libraries(Lute.UI PUBLIC simdutf::simdutf)
+endif()
+
+if(TARGET libgrapheme)
+    target_compile_definitions(Lute.UI PRIVATE LUTE_UI_USE_LIBGRAPHEME=1)
+    target_link_libraries(Lute.UI PUBLIC libgrapheme)
+endif()
+
+if(TARGET SheenBidi::SheenBidi)
+    target_compile_definitions(Lute.UI PRIVATE LUTE_UI_USE_SHEENBIDI=1)
+    target_link_libraries(Lute.UI PUBLIC SheenBidi::SheenBidi)
+endif()
+
 if(TARGET dawn::webgpu_dawn)
     target_compile_definitions(Lute.UI PRIVATE LUTE_UI_USE_DAWN=1)
     target_link_libraries(Lute.UI PUBLIC dawn::webgpu_dawn)

@@ -118,6 +118,14 @@ public:
         (void)out;
         return false;
     }
+
+    bool resolveFallbackUIFontRuns(std::string_view utf8, const std::vector<FallbackFontRange>& ranges, std::vector<FallbackFontRun>& out) const override
+    {
+        (void)utf8;
+        (void)ranges;
+        out.clear();
+        return false;
+    }
 };
 
 } // namespace

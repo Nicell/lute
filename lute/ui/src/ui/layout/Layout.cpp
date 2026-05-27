@@ -35,7 +35,62 @@ static MeasureResult measureGlyphRun(const GlyphRun& run)
     return {{run.advance, run.metrics.lineHeight}, run.metrics.baseline, run.metrics.baseline};
 }
 
-static std::shared_ptr<const GlyphRun> shapeText(UiNode& node)
+static MeasureResult measureTextLayout(const TextLayout& layout)
+{
+    std::optional<float> firstBaseline;
+    std::optional<float> lastBaseline;
+    if (!layout.lines.empty())
+    {
+        firstBaseline = layout.lines.front().baseline;
+        lastBaseline = layout.lines.back().baseline;
+    }
+    return {layout.size, firstBaseline, lastBaseline};
+}
+
+static std::shared_ptr<const GlyphRun> flattenLayoutRun(const TextLayout& layout)
+{
+    auto run = std::make_shared<GlyphRun>();
+    run->text = layout.text;
+    run->fontSize = layout.fontSize;
+    run->metrics = layout.metrics;
+
+    if (layout.lines.size() == 1)
+    {
+        for (const TextRunFragment& fragment : layout.lines.front().runs)
+        {
+            if (!fragment.glyphRun)
+                continue;
+            run->advance += fragment.glyphRun->advance;
+            run->rightToLeft = run->rightToLeft || fragment.glyphRun->rightToLeft;
+            run->glyphs.insert(run->glyphs.end(), fragment.glyphRun->glyphs.begin(), fragment.glyphRun->glyphs.end());
+        }
+    }
+    else
+    {
+        for (const TextLine& line : layout.lines)
+            run->advance = std::max(run->advance, line.advance);
+    }
+
+    return run;
+}
+
+static std::shared_ptr<const TextLayout> layoutText(UiNode& node, float maxWidth)
+{
+    if (node.textLayout && node.textLayout->text == node.text && node.textLayout->fontSize == kDefaultUiFontSize && node.textLayout->maxWidth == maxWidth)
+        return node.textLayout;
+
+    UiProfiler::addTextRunMeasured();
+    ProfileZone zone(ProfilePhase::Text);
+    TextShaper shaper;
+    node.textLayout = std::make_shared<TextLayout>(shaper.layoutParagraph(node.text, kDefaultUiFontSize, maxWidth));
+    if (node.textLayout->lines.size() == 1 && node.textLayout->lines.front().runs.size() == 1)
+        node.shapedText = node.textLayout->lines.front().runs.front().glyphRun;
+    else
+        node.shapedText = flattenLayoutRun(*node.textLayout);
+    return node.textLayout;
+}
+
+static std::shared_ptr<const GlyphRun> shapeSingleLineText(UiNode& node)
 {
     if (node.shapedText && node.shapedText->text == node.text && node.shapedText->fontSize == kDefaultUiFontSize)
         return node.shapedText;
@@ -44,12 +99,13 @@ static std::shared_ptr<const GlyphRun> shapeText(UiNode& node)
     ProfileZone zone(ProfilePhase::Text);
     TextShaper shaper;
     node.shapedText = std::make_shared<GlyphRun>(shaper.shapeSingleRun(node.text));
+    node.textLayout.reset();
     return node.shapedText;
 }
 
-static MeasureResult textMeasure(UiNode& node)
+static MeasureResult textMeasure(UiNode& node, float maxWidth)
 {
-    return measureGlyphRun(*shapeText(node));
+    return measureTextLayout(*layoutText(node, maxWidth));
 }
 
 void LayoutEngine::layout(NodeTree& tree, NodeId root, Vec2 viewport)
@@ -145,7 +201,7 @@ MeasureResult LayoutEngine::measureNode(NodeTree& tree, UiNode& node, Constraint
     }
     case WidgetKind::Text:
     {
-        MeasureResult measured = textMeasure(node);
+        MeasureResult measured = textMeasure(node, constraints.maxWidth);
         result.size = clampSize(measured.size, constraints);
         result.firstBaseline = measured.firstBaseline;
         result.lastBaseline = measured.lastBaseline;
@@ -154,7 +210,7 @@ MeasureResult LayoutEngine::measureNode(NodeTree& tree, UiNode& node, Constraint
     case WidgetKind::Button:
     {
         ControlMetrics metrics = resolveButtonMetrics(node);
-        MeasureResult label = textMeasure(node);
+        MeasureResult label = measureGlyphRun(*shapeSingleLineText(node));
         result.size = clampSize(controlPreferredSize(metrics, label.size), constraints);
         result.firstBaseline = controlFirstBaseline(metrics, label.firstBaseline);
         result.lastBaseline = result.firstBaseline;

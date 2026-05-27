@@ -104,6 +104,61 @@ set(HB_HAVE_FREETYPE OFF CACHE BOOL "Do not use FreeType in HarfBuzz" FORCE)
 set(HB_HAVE_CORETEXT OFF CACHE BOOL "Do not use CoreText in HarfBuzz" FORCE)
 add_subdirectory(extern/harfbuzz)
 
+# text-core setup
+set(SIMDUTF_TESTS OFF CACHE BOOL "Do not build simdutf tests" FORCE)
+set(SIMDUTF_TOOLS OFF CACHE BOOL "Do not build simdutf tools" FORCE)
+set(SIMDUTF_BENCHMARKS OFF CACHE BOOL "Do not build simdutf benchmarks" FORCE)
+set(SIMDUTF_ICONV OFF CACHE BOOL "Do not use iconv in simdutf" FORCE)
+set(SIMDUTF_USE_STATIC_INITIALIZATION ON CACHE BOOL "Allow simdutf static implementation dispatch" FORCE)
+add_subdirectory(extern/simdutf)
+
+set(_lute_libgrapheme_generated_headers)
+foreach(_lute_libgrapheme_table bidirectional case character line sentence word)
+    set(_lute_libgrapheme_generator "libgrapheme_gen_${_lute_libgrapheme_table}")
+    set(_lute_libgrapheme_header "${PROJECT_SOURCE_DIR}/extern/libgrapheme/gen/${_lute_libgrapheme_table}.h")
+    add_executable(${_lute_libgrapheme_generator} EXCLUDE_FROM_ALL
+        "extern/libgrapheme/gen/${_lute_libgrapheme_table}.c"
+        "extern/libgrapheme/gen/util.c"
+    )
+    target_include_directories(${_lute_libgrapheme_generator} PRIVATE extern/libgrapheme)
+    add_custom_command(
+        OUTPUT "${_lute_libgrapheme_header}"
+        COMMAND
+            ${CMAKE_COMMAND}
+            "-DGENERATOR=$<TARGET_FILE:${_lute_libgrapheme_generator}>"
+            "-DOUTPUT_FILE=${_lute_libgrapheme_header}"
+            -P "${PROJECT_SOURCE_DIR}/CMakeBuild/run_to_file.cmake"
+        DEPENDS ${_lute_libgrapheme_generator}
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}/extern/libgrapheme"
+        VERBATIM
+    )
+    list(APPEND _lute_libgrapheme_generated_headers "${_lute_libgrapheme_header}")
+endforeach()
+
+add_library(libgrapheme STATIC
+    ${_lute_libgrapheme_generated_headers}
+    extern/libgrapheme/src/bidirectional.c
+    extern/libgrapheme/src/case.c
+    extern/libgrapheme/src/character.c
+    extern/libgrapheme/src/line.c
+    extern/libgrapheme/src/sentence.c
+    extern/libgrapheme/src/utf8.c
+    extern/libgrapheme/src/util.c
+    extern/libgrapheme/src/word.c
+)
+target_include_directories(libgrapheme PUBLIC extern/libgrapheme)
+target_compile_definitions(libgrapheme PRIVATE _ISOC99_SOURCE)
+if(MSVC)
+    target_compile_options(libgrapheme PRIVATE /wd4146 /wd4244 /wd4267)
+else()
+    target_compile_options(libgrapheme PRIVATE -Wno-overlength-strings)
+endif()
+
+set(SB_CONFIG_UNITY ON CACHE BOOL "Build SheenBidi as a unity source" FORCE)
+set(SB_CONFIG_EXPERIMENTAL_TEXT_API OFF CACHE BOOL "Do not build SheenBidi experimental text API" FORCE)
+set(BUILD_GENERATOR OFF CACHE BOOL "Do not build SheenBidi generator" FORCE)
+add_subdirectory(extern/SheenBidi)
+
 # Dawn setup
 set(DAWN_FETCH_DEPENDENCIES ON CACHE BOOL "Fetch Dawn third-party dependencies during CMake configure" FORCE)
 set(DAWN_ENABLE_METAL ON CACHE BOOL "Enable Dawn Metal backend" FORCE)

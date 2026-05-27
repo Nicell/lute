@@ -313,21 +313,32 @@ public:
 class CoreTextServices final : public lute::ui::NativeTextServices
 {
 public:
+    CoreTextServices()
+        : defaultFont(createCoreTextSystemFont())
+        , fallbackBaseFont(createCoreTextSystemFont(lute::ui::kDefaultUiFontSize))
+    {
+    }
+
+    ~CoreTextServices() override
+    {
+        if (fallbackBaseFont)
+            CFRelease(fallbackBaseFont);
+        if (defaultFont)
+            CFRelease(defaultFont);
+    }
+
     bool resolveDefaultUIFont(lute::ui::PlatformFontDescriptor& out) const override
     {
-        CTFontRef font = createCoreTextSystemFont();
-        if (!font)
+        if (!defaultFont)
             return false;
 
-        out = platformFontFromCoreTextFont(font);
-        CFRelease(font);
+        out = platformFontFromCoreTextFont(defaultFont);
         return !out.path.empty();
     }
 
     bool resolveFallbackUIFont(std::string_view utf8, lute::ui::PlatformFontDescriptor& out) const override
     {
-        CTFontRef baseFont = createCoreTextSystemFont(lute::ui::kDefaultUiFontSize);
-        if (!baseFont)
+        if (!fallbackBaseFont)
             return false;
 
         CFStringRef string = CFStringCreateWithBytes(
@@ -338,20 +349,46 @@ public:
             false
         );
         if (!string)
-        {
-            CFRelease(baseFont);
             return false;
-        }
 
-        CTFontRef fallbackFont = CTFontCreateForString(baseFont, string, CFRangeMake(0, CFStringGetLength(string)));
-        out = platformFontFromCoreTextFont(fallbackFont ? fallbackFont : baseFont);
+        CTFontRef fallbackFont = CTFontCreateForString(fallbackBaseFont, string, CFRangeMake(0, CFStringGetLength(string)));
+        out = platformFontFromCoreTextFont(fallbackFont ? fallbackFont : fallbackBaseFont);
+        out.probeText.assign(utf8.data(), utf8.size());
 
         if (fallbackFont)
             CFRelease(fallbackFont);
         CFRelease(string);
-        CFRelease(baseFont);
         return !out.path.empty();
     }
+
+    bool resolveFallbackUIFontRuns(std::string_view utf8, const std::vector<FallbackFontRange>& ranges, std::vector<FallbackFontRun>& out) const override
+    {
+        out.clear();
+        if (!fallbackBaseFont || utf8.empty() || ranges.empty())
+            return false;
+
+        out.reserve(ranges.size());
+        for (const FallbackFontRange& range : ranges)
+        {
+            size_t start = std::min(range.start, utf8.size());
+            size_t end = std::min(range.end, utf8.size());
+            if (start >= end)
+                continue;
+
+            FallbackFontRun fallbackRun{start, end, {}};
+            if (resolveFallbackUIFont(std::string_view(utf8.data() + start, end - start), fallbackRun.font))
+            {
+                fallbackRun.font.probeText.assign(utf8.data() + start, end - start);
+                out.push_back(std::move(fallbackRun));
+            }
+        }
+
+        return !out.empty();
+    }
+
+private:
+    CTFontRef defaultFont = nullptr;
+    CTFontRef fallbackBaseFont = nullptr;
 };
 
 } // namespace
